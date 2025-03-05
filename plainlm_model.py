@@ -5,7 +5,6 @@ from torch import nn
 from dataclasses import dataclass
 from typing import Tuple
 
-
 @dataclass
 class ModelConfig:
     vocab_size: int
@@ -18,6 +17,21 @@ class ModelConfig:
     rmsorm_eps: float = 1e-6
     tie_embeddings: bool = False
 
+class MLP(nn.Module):
+    def __init__(self, dim: int, hidden_dim: int, multiple_of: int = 256):
+        super().__init__()
+        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        self.fc1 = nn.Linear(dim, 2 * hidden_dim, bias=False)
+        self.fc2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.glu = nn.GLU(dim=2)
+
+        # Initialize with Xavier uniform
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.xavier_uniform_(self.fc2.weight)
+
+    def forward(self, x):
+        # x: (bsz, T, dim)
+        return self.fc2(self.glu(self.fc1(x)))
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -34,51 +48,6 @@ class RMSNorm(torch.nn.Module):
         return output * self.weight
 
 
-class MLP(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int, multiple_of: int = 256):
-        super().__init__()
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-        self.fc1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.fc2 = nn.Linear(hidden_dim, dim, bias=False)
-
-    def forward(self, x):
-        # x: (bsz, T, dim)
-        return self.fc2(F.silu(self.fc1(x)))
-
-
-class GLU(nn.Module):
-    """fused GLU"""
-    def __init__(self, dim: int, hidden_dim: int, multiple_of: int = 256):
-        super().__init__()
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-        self.hidden_dim = hidden_dim
-        self.fc1 = nn.Linear(dim, 2*hidden_dim, bias=False)
-        self.fc2 = nn.Linear(hidden_dim, dim, bias=False)
-
-    def forward(self, x):
-        # x: (bsz, T, dim)
-        x, z = self.fc1(x).split(self.hidden_dim, dim=2)
-        return self.fc2(F.silu(x) * z)
-
-
-class MLPReluSquared(nn.Module):
-    """MLP with ReLU squared"""
-    def __init__(self, dim: int, hidden_dim: int, multiple_of: int = 256):
-        super().__init__()
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-        self.fc1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.fc2 = nn.Linear(hidden_dim, dim, bias=False)
-
-    def forward(self, x):
-        # x: (bsz, T, dim)
-        return self.fc2(F.relu(self.fc1(x)).pow(2))
-
-
-MLP_CLASSES = {
-    "mlp": MLP,
-    "glu": GLU,
-    "mlp_relu_sq": MLPReluSquared
-}
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, condense_ratio: int = 1):
@@ -140,7 +109,7 @@ class Block(nn.Module):
         super().__init__()
         self.attn = Attention(cfg)
         self.attn_norm = RMSNorm(cfg.dim, cfg.rmsorm_eps)
-        self.mlp = MLP_CLASSES[cfg.mlp](dim=cfg.dim, hidden_dim=int(cfg.expand * cfg.dim))
+        self.mlp = MLP(dim=cfg.dim, hidden_dim=int(cfg.expand * cfg.dim))
         self.mlp_norm = RMSNorm(cfg.dim, cfg.rmsorm_eps)
         self.layer_id = layer_id
 
@@ -155,6 +124,7 @@ class Transformer(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.n_layers = cfg.n_layers
+        self.cfg = cfg
         head_dim = cfg.dim // cfg.n_heads; assert cfg.dim % cfg.n_heads == 0
 
         self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.dim)
@@ -178,6 +148,38 @@ class Transformer(nn.Module):
         for layer in self.layers:
             x = layer(x, self.freqs_cis) # (bsz, seqlen, dim)
         return self.lm_head(self.out_norm(x)) # (bsz, seqlen, vocab_size)
+    
+    def predict(self, x, k=1):
+        """Generate k tokens autoregressively.
+        
+        Args:
+            x: Input token sequence of shape (batch_size, seq_len)
+            k: Number of tokens to predict
+            
+        Returns:
+            Tuple of (input_ids, predicted_ids)
+        """
+        batch_size = x.shape[0]
+        seq_len = x.shape[1]
+        
+        # Store original input
+        original_input = x.clone()
+        
+        # Generate k tokens autoregressively
+        for j in range(k):
+            # Get logits for the entire sequence
+            logits = self(x)
+            
+            # Get the logits for the last token in each sequence
+            next_token_logits = logits[:, -j, :]
+            
+            # Get the most likely token
+            next_token = torch.argmax(next_token_logits, dim=-1)
+            
+            # Set the token in x to the predicted one
+            x[:, -j] = next_token
+
+        return original_input, x[:, -k:]
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -209,15 +211,16 @@ class Transformer(nn.Module):
 def main():
     print("Initializing transformer model and running forward pass...")
 
+    seq_length = 512
+
     # Define model configuration
     config = ModelConfig(
         vocab_size=32000,  # Common vocab size for tokenizers like BPE or SentencePiece
-        seq_len=512,      # Maximum sequence length
+        seq_len=seq_length,      # Maximum sequence length
         dim=768,           # Embedding dimension
         expand=4.0,        # MLP expansion factor
         n_layers=12,       # Number of transformer layers
         n_heads=12,        # Number of attention heads
-        mlp='mlp',         # MLP type: 'mlp', 'glu', or 'mlp_relu_sq'
         rmsorm_eps=1e-6,   # RMSNorm epsilon
         tie_embeddings=True # Tie embedding and output weights
     )
@@ -234,7 +237,6 @@ def main():
 
     # Create sample input: batch of 2 sequences, each with 512 tokens
     batch_size = 2
-    seq_length = 512  # Using a sequence length less than the max
 
     # Random token indices between 0 and vocab_size-1
     input_ids = torch.randint(0, config.vocab_size, (batch_size, seq_length))
@@ -246,15 +248,28 @@ def main():
         # Forward pass
         output = model(input_ids)
 
-    # Print output shape
-    print(f"Input shape: {input_ids.shape}")
-    print(f"Output shape: {output.shape}")
+        # Print output shape
+        print(f"Input shape: {input_ids.shape}")
+        print(f"Output shape: {output.shape}")
 
-    # Sample from output logits for the first sequence
-    # Take the last token's prediction and get most likely next token
-    last_token_logits = output[0, -1, :]
-    next_token_id = torch.argmax(last_token_logits).item()
-    print(f"Most likely next token ID for first sequence: {next_token_id}")
+        # Sample from output logits for the first sequence
+        # Take the last token's prediction and get most likely next token
+        last_token_logits = output[0, -1, :]
+        next_token_id = torch.argmax(last_token_logits).item()
+        print(f"Most likely next token ID for first sequence: {next_token_id}")
+        
+        # Test the predict function
+        print("\nTesting predict function...")
+        # Use a shorter sequence for prediction
+        short_seq = input_ids
+        print(f"Input sequence shape: {short_seq.shape}")
+        
+        # Predict 5 tokens
+        k = 5
+        original, predicted = model.predict(short_seq, k)
+        
+        print(f"Original sequence: {original[0, -k:]}")
+        print(f"Predicted {k} tokens: {predicted[0]}")
 
     print("Forward pass completed successfully!")
 

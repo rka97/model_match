@@ -53,21 +53,63 @@ class TransformerDo(nn.Module):
         y_BxLxD = self.out_ln(y_BxLxD)
         logits_BxLxV = self.embed.attend(y_BxLxD.astype(jnp.float32))
         return logits_BxLxV
+    
+    def predict(self, y_BxL: jax.Array, k: int = 1):
+        """Generate k tokens autoregressively.
+        
+        Args:
+            y_BxL: Input token sequence of shape (batch_size, seq_len)
+            k: Number of tokens to predict
+            
+        Returns:
+            Tuple of (input_ids, predicted_ids)
+        """
+        cfg = self.docfg
+        batch_size = y_BxL.shape[0]
+        seq_len = y_BxL.shape[1]
+        
+        # Store original input
+        original_input = y_BxL
+        
+        # Make sure we don't exceed the model's context length
+        if seq_len + k > cfg.L:
+            raise ValueError(f"Total sequence length ({seq_len + k}) exceeds model's context length ({cfg.L})")
+        
+        # Generate k tokens autoregressively
+        for _ in range(k):
+            # Get logits for the entire sequence
+            logits = self(y_BxL)
+            
+            # Get the logits for the last token in each sequence
+            next_token_logits = logits[:, -1, :]
+            
+            # Get the most likely token
+            next_token = jnp.argmax(next_token_logits, axis=-1)
+            
+            # Append the predicted token to the sequence
+            y_BxL = jnp.concatenate([y_BxL, next_token[:, None]], axis=1)
+        
+        # Return original input and the k predicted tokens
+        return original_input, y_BxL[:, -k:]
 
 
 class Mlp(nn.Module):
-    """Multilayer perceptron."""
+    """Multilayer perceptron with GLU activation."""
     cfg: DoConfig
 
     @nn.compact
     def __call__(self, x_BxLxD: jax.Array):
         cfg = self.cfg
+        # Use Xavier uniform initialization explicitly
+        xavier_init = nn.initializers.xavier_uniform()
         linear = partial(
-            nn.Dense, kernel_init=cfg.kernel_init, use_bias=False,
+            nn.Dense, kernel_init=xavier_init, use_bias=False,
             dtype=cfg.dtype
         )
-        x_BxLxF = linear(cfg.F)(x_BxLxD)
-        x_BxLxF = jax.nn.gelu(x_BxLxF)
+        # Double the hidden dimension for GLU
+        x_BxLx2F = linear(2 * cfg.F)(x_BxLxD)
+        # Apply GLU activation
+        x_BxLxF = nn.glu(x_BxLx2F, axis=-1)
         x_BxLxD = linear(cfg.D)(x_BxLxF)
         return x_BxLxD
 
@@ -193,6 +235,19 @@ def main():
     predictions = jnp.argmax(logits, axis=-1)
     print("\nPredicted token IDs (first sequence, first 10 positions):")
     print(predictions[0, :10])
+    
+    # Test the predict function
+    print("\nTesting predict function...")
+    # Use a shorter sequence for prediction
+    short_seq = x_BxL[:, :10]
+    print(f"Input sequence shape: {short_seq.shape}")
+    
+    # Predict 5 tokens
+    k = 5
+    original, predicted = model.apply(params, short_seq, k, method=model.predict)
+    
+    print(f"Original sequence: {original[0]}")
+    print(f"Predicted {k} tokens: {predicted[0]}")
 
     print("\nDone!")
 
