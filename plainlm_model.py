@@ -156,7 +156,8 @@ class Transformer(nn.Module):
     def forward(self, x):
         # x: (bsz, seqlen)
         x = self.embed_tokens(x)  # (bsz, seqlen, dim)
-        self.freqs_cis = self.freqs_cis.to(x.device)
+        L = x.shape[1]
+        self.freqs_cis = self.freqs_cis.to(x.device)[:, :L, :]
         for layer in self.layers:
             x = layer(x, self.freqs_cis)  # (bsz, seqlen, dim)
         return self.lm_head(self.out_norm(x))  # (bsz, seqlen, vocab_size)
