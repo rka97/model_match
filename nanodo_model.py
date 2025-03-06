@@ -6,10 +6,9 @@ from functools import partial
 from flax import linen as nn
 import jax
 import jax.numpy as jnp
+from match_rope import init_jax_rope, apply_rope_jax
 
 # =========== Transformer Decoder-only Model ==========
-
-
 
 @dataclasses.dataclass
 class DoConfig:
@@ -51,55 +50,76 @@ class Mlp(nn.Module):
 
 
 class CausalAttn(nn.Module):
-    """Causal attention layer."""
+    """Causal attention layer with rotary embeddings."""
 
     cfg: DoConfig
 
-    @nn.compact
-    def __call__(self, x_BxLxD: jax.Array):
+    def setup(self):
         cfg = self.cfg
-
         assert cfg.D % cfg.H == 0, f"D {cfg.D} not divisible by H {cfg.H}"
-        Dh = cfg.D // cfg.H
+        self.Dh = cfg.D // cfg.H
+
+        # Initialize rotary embeddings
+        self.freqs_cis = init_jax_rope(cfg.D, cfg.L, cfg.H)
 
         # Maps D -> (H, Dh)
-        multilinear = partial(
+        self.multilinear = partial(
             nn.DenseGeneral,
             axis=-1,
-            features=(cfg.H, Dh),
+            features=(cfg.H, self.Dh),
             kernel_init=cfg.kernel_init,
             use_bias=False,
             dtype=cfg.dtype,
         )
 
-        q_BxLxHxDh, k_BxLxHxDh, v_BxLxHxDh = (
-            multilinear(name="query")(x_BxLxD),
-            multilinear(name="key")(x_BxLxD),
-            multilinear(name="value")(x_BxLxD),
+        self.multilinear_query = self.multilinear(name="query")
+        self.multilinear_key = self.multilinear(name="key")
+        self.multilinear_value = self.multilinear(name="value")
+        self.output_projection = nn.DenseGeneral(
+            features=cfg.D,
+            name="attn_out_proj",
+            # axis=(-2, -1),      #
+            kernel_init=cfg.kernel_init,
+            use_bias=False,
+            dtype=cfg.dtype,
         )
-        q_BxLxHxDh /= Dh**0.5
-        att_BxHxLxL = jnp.einsum("...qhd,...khd->...hqk", q_BxLxHxDh, k_BxLxHxDh)
-        # cast to fp32 for softmax
-        att_BxHxLxL = att_BxHxLxL.astype(jnp.float32)
 
-        # causal attention mask
+    def __call__(self, x_BxLxD: jax.Array):
+        cfg = self.cfg
+
+        # Project inputs to Q, K, V
+        q_BxLxHxDh = self.multilinear_query(x_BxLxD)
+        k_BxLxHxDh = self.multilinear_key(x_BxLxD)
+        v_BxLxHxDh = self.multilinear_value(x_BxLxD)
+
+        # Apply rotary embeddings to Q and K
+        q_BxLxHxDh, k_BxLxHxDh = apply_rope_jax(q_BxLxHxDh, k_BxLxHxDh, self.freqs_cis)
+
+        # Scale queries
+        q_BxLxHxDh /= self.Dh**0.5
+
+        # Compute attention scores
+        att_BxHxLxL = jnp.einsum("...qhd,...khd->...hqk", q_BxLxHxDh, k_BxLxHxDh)
+
+        # Causal attention mask
         L = x_BxLxD.shape[1]
         mask_1x1xLxL = jnp.tril(jnp.ones((1, 1, L, L), dtype=jnp.bool_))
 
+        # Apply mask and softmax
         _NEG_INF = jnp.finfo(cfg.dtype).min
         att_BxHxLxL = jnp.where(mask_1x1xLxL, att_BxHxLxL, _NEG_INF)
         att_BxHxLxL = jax.nn.softmax(att_BxHxLxL, axis=-1)
         att_BxHxLxL = att_BxHxLxL.astype(cfg.dtype)
+
+        # Compute attention output
         out_BxLxHxDh = jnp.einsum("...hqk,...khd->...qhd", att_BxHxLxL, v_BxLxHxDh)
-        # Output projection followed by contraction back to original dims
-        out_BxLxD = nn.DenseGeneral(
-            features=cfg.D,
-            name="attn_out_proj",
-            axis=(-2, -1),
-            kernel_init=cfg.kernel_init,
-            use_bias=False,
-            dtype=cfg.dtype,
-        )(out_BxLxHxDh)
+
+        # Reshape and project output
+        out_BxLxD = out_BxLxHxDh.reshape(*x_BxLxD.shape)
+
+        # Output projection
+        out_BxLxD = self.output_projection(out_BxLxD)
+
         return out_BxLxD
 
 
@@ -268,6 +288,9 @@ def main():
     short_seq = x_BxL[:, :10]
     print(f"Input sequence shape: {short_seq.shape}")
 
+    # Predict 5 tokens
+    k = 5
+    original, predicted = model.apply(params, short_seq, k, method=model.predict)
     # Predict 5 tokens
     k = 5
     original, predicted = model.apply(params,

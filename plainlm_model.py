@@ -71,6 +71,7 @@ class Attention(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         assert cfg.dim % cfg.n_heads == 0
+        self.dim = cfg.dim
         self.n_heads = cfg.n_heads
         self.head_dim = cfg.dim // cfg.n_heads
 
@@ -263,7 +264,6 @@ def main():
         n_heads=12,  # Number of attention heads
         rmsnorm_eps=1e-6,  # RMSNorm epsilon
         tie_embeddings=True,  # Tie embedding and output weights
-        32000,  # Common vocab size for tokenizers like BPE or SentencePiece
     )
 
     # Initialize model
