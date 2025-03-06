@@ -10,6 +10,8 @@ from match_rope import init_jax_rope, apply_rope_jax
 
 # =========== Transformer Decoder-only Model ==========
 
+
+
 @dataclasses.dataclass
 class DoConfig:
     """Hyper-parameters for Transformer decoder-only."""
@@ -26,6 +28,7 @@ class DoConfig:
     )
     dtype: jnp.dtype = jnp.float32
     rmsnorm_epsilon: float = 1e-6
+    multiple_of: int = 256
 
 
 class Mlp(nn.Module):
@@ -41,8 +44,11 @@ class Mlp(nn.Module):
         linear = partial(
             nn.Dense, kernel_init=xavier_init, use_bias=False, dtype=cfg.dtype
         )
+        hidden_dim = cfg.multiple_of * (
+            (cfg.F + cfg.multiple_of - 1) // cfg.multiple_of
+        )
         # Double the hidden dimension for GLU
-        x_BxLx2F = linear(2 * cfg.F)(x_BxLxD)
+        x_BxLx2F = linear(2 * hidden_dim)(x_BxLxD)
         # Apply GLU activation
         x_BxLxF = nn.glu(x_BxLx2F, axis=-1)
         x_BxLxD = linear(cfg.D)(x_BxLxF)
@@ -132,13 +138,14 @@ class TBlock(nn.Module):
     def __call__(self, in_BxLxD: jax.Array):
         cfg = self.docfg
 
-        # "pre-layernorm"
+        # x = x + attn( attn_norm(x) )
         x_BxLxD = nn.RMSNorm(param_dtype=cfg.dtype, epsilon=cfg.rmsnorm_epsilon)(
             in_BxLxD
         )
         x_BxLxD = CausalAttn(cfg)(x_BxLxD)
         x_BxLxD += in_BxLxD
 
+        # x = x + mlp( mlp_norm(x) )
         z_BxLxD = nn.RMSNorm(param_dtype=cfg.dtype, epsilon=cfg.rmsnorm_epsilon)(
             x_BxLxD
         )
@@ -291,6 +298,17 @@ def main():
     # Predict 5 tokens
     k = 5
     original, predicted = model.apply(params, short_seq, k, method=model.predict)
+    # Predict 5 tokens
+    k = 5
+    original, predicted = model.apply(params, short_seq, k, method=model.predict)
+    print(f"Input sequence shape: {short_seq.shape}")
+
+    # Predict 5 tokens
+    k = 5
+    original, predicted = model.apply(params,
+                                      short_seq,
+                                      k,
+                                      method=model.predict)
     # Predict 5 tokens
     k = 5
     original, predicted = model.apply(params,

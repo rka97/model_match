@@ -5,6 +5,8 @@ from torch import nn
 from dataclasses import dataclass
 from typing import Tuple
 
+
+
 @dataclass
 class ModelConfig:
     vocab_size: int
@@ -18,9 +20,11 @@ class ModelConfig:
 
 
 class MLP(nn.Module):
+
     def __init__(self, dim: int, hidden_dim: int, multiple_of: int = 256):
         super().__init__()
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        hidden_dim = multiple_of * (
+            (hidden_dim + multiple_of - 1) // multiple_of)
         self.fc1 = nn.Linear(dim, 2 * hidden_dim, bias=False)
         self.fc2 = nn.Linear(hidden_dim, dim, bias=False)
         self.glu = nn.GLU(dim=2)
@@ -34,32 +38,33 @@ class MLP(nn.Module):
         return self.fc2(self.glu(self.fc1(x)))
 
 
-def precompute_freqs_cis(
-    dim: int, end: int, theta: float = 10000.0, condense_ratio: int = 1
-):
-    inv_freqs = 1.0 / (
-        theta
-        ** (
-            torch.arange(0, dim, 2, dtype=torch.float32, device=torch.device("cpu"))
-            / dim
-        )
-    )
-    t = torch.arange(end, dtype=torch.float32, device=inv_freqs.device) / condense_ratio
+def precompute_freqs_cis(dim: int,
+                         end: int,
+                         theta: float = 10000.0,
+                         condense_ratio: int = 1):
+    inv_freqs = 1.0 / (theta**(torch.arange(
+        0, dim, 2, dtype=torch.float32, device=torch.device("cpu")) / dim))
+    t = torch.arange(end, dtype=torch.float32,
+                     device=inv_freqs.device) / condense_ratio
     freqs = torch.outer(t, inv_freqs).float()
-    return torch.stack(
-        [torch.cos(freqs)[None, :, None, :], torch.sin(freqs)[None, :, None, :]], dim=4
-    )
+    return torch.stack([
+        torch.cos(freqs)[None, :, None, :],
+        torch.sin(freqs)[None, :, None, :]
+    ],
+                       dim=4)
 
 
 def apply_rotary_emb_complex_like(
-    q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
+        q: torch.Tensor, k: torch.Tensor,
+        freqs_cis: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     # Rotate query and key vectors using RoPE
     qk_r2 = torch.cat([q, k], dim=2).unflatten(dim=-1, sizes=(-1, 2)).float()
     rotated_qk_r2 = torch.stack(
         [
-            qk_r2[..., 0] * freqs_cis[..., 0] - qk_r2[..., 1] * freqs_cis[..., 1],
-            qk_r2[..., 1] * freqs_cis[..., 0] + qk_r2[..., 0] * freqs_cis[..., 1],
+            qk_r2[..., 0] * freqs_cis[..., 0] -
+            qk_r2[..., 1] * freqs_cis[..., 1],
+            qk_r2[..., 1] * freqs_cis[..., 0] +
+            qk_r2[..., 0] * freqs_cis[..., 1],
         ],
         -1,
     ).flatten(3)
@@ -68,6 +73,7 @@ def apply_rotary_emb_complex_like(
 
 
 class Attention(nn.Module):
+
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         assert cfg.dim % cfg.n_heads == 0
@@ -82,28 +88,31 @@ class Attention(nn.Module):
         bsz, seqlen, d = x.shape  # (bsz, seqlen, d)
 
         q, k, v = self.w_qkv(x).split(d, dim=2)  # (bsz, seqlen, d)
-        q = q.view(bsz, seqlen, self.n_heads, self.head_dim)  # (bsz, seqlen, nh, h_dim)
-        k = k.view(bsz, seqlen, self.n_heads, self.head_dim)  # (bsz, seqlen, nh, h_dim)
-        v = v.view(bsz, seqlen, self.n_heads, self.head_dim)  # (bsz, seqlen, nh, h_dim)
+        q = q.view(bsz, seqlen, self.n_heads,
+                   self.head_dim)  # (bsz, seqlen, nh, h_dim)
+        k = k.view(bsz, seqlen, self.n_heads,
+                   self.head_dim)  # (bsz, seqlen, nh, h_dim)
+        v = v.view(bsz, seqlen, self.n_heads,
+                   self.head_dim)  # (bsz, seqlen, nh, h_dim)
 
         q, k = apply_rotary_emb_complex_like(
-            q, k, freqs_cis=freqs_cis
-        )  # (bsz, seqlen, nh, h_dim)
+            q, k, freqs_cis=freqs_cis)  # (bsz, seqlen, nh, h_dim)
 
         q = q.transpose(1, 2)  # (bsz, nh, seqlen, h_dim)
         k = k.transpose(1, 2)  # (bsz, nh, seqlen, h_dim)
         v = v.transpose(1, 2)  # (bsz, nh, seqlen, h_dim)
 
         out = F.scaled_dot_product_attention(
-            q, k, v, is_causal=True
-        )  # (bsz, nh, seqlen, h_dim)
+            q, k, v, is_causal=True)  # (bsz, nh, seqlen, h_dim)
 
-        out = out.transpose(1, 2).contiguous().view(bsz, seqlen, d)  # (bsz, seqlen, d)
+        out = out.transpose(1, 2).contiguous().view(bsz, seqlen,
+                                                    d)  # (bsz, seqlen, d)
 
         return self.w_out(out)
 
 
 class Block(nn.Module):
+
     def __init__(self, layer_id: int, cfg: ModelConfig):
         super().__init__()
         self.attn = Attention(cfg)
@@ -120,6 +129,7 @@ class Block(nn.Module):
 
 
 class Transformer(nn.Module):
+
     def __init__(self, cfg):
         super().__init__()
         self.n_layers = cfg.n_layers
@@ -128,13 +138,13 @@ class Transformer(nn.Module):
         assert cfg.dim % cfg.n_heads == 0
 
         self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.dim)
-        self.layers = nn.ModuleList([Block(idx, cfg) for idx in range(cfg.n_layers)])
+        self.layers = nn.ModuleList(
+            [Block(idx, cfg) for idx in range(cfg.n_layers)])
         self.out_norm = nn.RMSNorm(cfg.dim, eps=cfg.rmsnorm_eps)
         self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
 
-        self.freqs_cis = precompute_freqs_cis(head_dim, cfg.seq_len, 500000)[
-            0 : cfg.seq_len
-        ]
+        self.freqs_cis = precompute_freqs_cis(head_dim, cfg.seq_len,
+                                              500000)[0:cfg.seq_len]
 
         # init all weights, scale residual branches
         self.apply(self._init_weights)
@@ -194,13 +204,13 @@ class Transformer(nn.Module):
     def _scale_residual_branches(self):
         for n, p in self.named_parameters():
             if n.endswith("fc2.weight"):  # mlp/glu output layer
-                torch.nn.init.normal_(
-                    p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layers)
-                )
+                torch.nn.init.normal_(p,
+                                      mean=0.0,
+                                      std=0.02 / math.sqrt(2 * self.n_layers))
             if n.endswith("w_out.weight"):  # attn output layer
-                torch.nn.init.normal_(
-                    p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layers)
-                )
+                torch.nn.init.normal_(p,
+                                      mean=0.0,
+                                      std=0.02 / math.sqrt(2 * self.n_layers))
 
     def tie_weights(self):
         self.lm_head.weight = self.embed_tokens.weight
@@ -209,9 +219,8 @@ class Transformer(nn.Module):
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
             n_params -= self.embed_tokens.weight.numel()
-            if (
-                not self.lm_head.weight is self.embed_tokens.weight
-            ):  # if no weight tying
+            if (not self.lm_head.weight
+                    is self.embed_tokens.weight):  # if no weight tying
                 n_params -= self.lm_head.weight.numel()
         return n_params
 
@@ -223,7 +232,8 @@ def main():
 
     # Define model configuration
     config = ModelConfig(
-        vocab_size=32000,  # Common vocab size for tokenizers like BPE or SentencePiece
+        vocab_size=
+        32000,  # Common vocab size for tokenizers like BPE or SentencePiece
         seq_len=seq_length,  # Maximum sequence length
         dim=768,  # Embedding dimension
         expand=4.0,  # MLP expansion factor
@@ -242,9 +252,8 @@ def main():
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
             n_params -= self.embed_tokens.weight.numel()
-            if (
-                not self.lm_head.weight is self.embed_tokens.weight
-            ):  # if no weight tying
+            if (not self.lm_head.weight
+                    is self.embed_tokens.weight):  # if no weight tying
                 n_params -= self.lm_head.weight.numel()
         return n_params
 
@@ -256,7 +265,8 @@ def main():
 
     # Define model configuration
     config = ModelConfig(
-        vocab_size=32000,  # Common vocab size for tokenizers like BPE or SentencePiece
+        vocab_size=
+        32000,  # Common vocab size for tokenizers like BPE or SentencePiece
         seq_len=seq_length,  # Maximum sequence length
         dim=768,  # Embedding dimension
         expand=4.0,  # MLP expansion factor
