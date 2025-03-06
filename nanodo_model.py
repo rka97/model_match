@@ -9,9 +9,12 @@ import jax.numpy as jnp
 
 # =========== Transformer Decoder-only Model ==========
 
+
+
 @dataclasses.dataclass
 class DoConfig:
     """Hyper-parameters for Transformer decoder-only."""
+
     D: int  # model/embed dim = qkv dim
     H: int  # num attention heads
     L: int  # max context/sequence length
@@ -20,81 +23,15 @@ class DoConfig:
     F: int  # FF inner dimension
     kernel_init: nn.initializers.Initializer = nn.initializers.xavier_uniform()
     embed_init: nn.initializers.Initializer = nn.initializers.variance_scaling(
-        1.0, 'fan_in', 'normal', out_axis=0)
+        1.0, "fan_in", "normal", out_axis=0
+    )
     dtype: jnp.dtype = jnp.float32
-
-
-class TransformerDo(nn.Module):
-    """Transformer decoder-only."""
-    docfg: DoConfig
-
-    def setup(self):
-        cfg = self.docfg
-        self.embed = nn.Embed(
-            num_embeddings=cfg.V,
-            features=cfg.D,
-            embedding_init=cfg.embed_init,
-        )
-        self.pos_embed = nn.Embed(
-            num_embeddings=cfg.L,
-            features=cfg.D,
-            embedding_init=cfg.embed_init,
-        )
-
-        self.blocks = [TBlock(cfg) for _ in range(cfg.N)]
-        self.out_ln = nn.LayerNorm(dtype=cfg.dtype, use_bias=False)
-
-    def __call__(self, y_BxL: jax.Array):
-        # For training on concatenated examples.
-        y_BxLxD = self.embed(y_BxL)
-        y_BxLxD += self.pos_embed(jnp.arange(0, y_BxL.shape[1])[None, ...])
-        for block in self.blocks:
-            y_BxLxD = block(y_BxLxD)
-        y_BxLxD = self.out_ln(y_BxLxD)
-        logits_BxLxV = self.embed.attend(y_BxLxD.astype(jnp.float32))
-        return logits_BxLxV
-    
-    def predict(self, y_BxL: jax.Array, k: int = 1):
-        """Generate k tokens autoregressively.
-        
-        Args:
-            y_BxL: Input token sequence of shape (batch_size, seq_len)
-            k: Number of tokens to predict
-            
-        Returns:
-            Tuple of (input_ids, predicted_ids)
-        """
-        cfg = self.docfg
-        batch_size = y_BxL.shape[0]
-        seq_len = y_BxL.shape[1]
-        
-        # Store original input
-        original_input = y_BxL
-        
-        # Make sure we don't exceed the model's context length
-        if seq_len + k > cfg.L:
-            raise ValueError(f"Total sequence length ({seq_len + k}) exceeds model's context length ({cfg.L})")
-        
-        # Generate k tokens autoregressively
-        for _ in range(k):
-            # Get logits for the entire sequence
-            logits = self(y_BxL)
-            
-            # Get the logits for the last token in each sequence
-            next_token_logits = logits[:, -1, :]
-            
-            # Get the most likely token
-            next_token = jnp.argmax(next_token_logits, axis=-1)
-            
-            # Append the predicted token to the sequence
-            y_BxL = jnp.concatenate([y_BxL, next_token[:, None]], axis=1)
-        
-        # Return original input and the k predicted tokens
-        return original_input, y_BxL[:, -k:]
+    rmsnorm_epsilon: float = 1e-6
 
 
 class Mlp(nn.Module):
     """Multilayer perceptron with GLU activation."""
+
     cfg: DoConfig
 
     @nn.compact
@@ -103,8 +40,7 @@ class Mlp(nn.Module):
         # Use Xavier uniform initialization explicitly
         xavier_init = nn.initializers.xavier_uniform()
         linear = partial(
-            nn.Dense, kernel_init=xavier_init, use_bias=False,
-            dtype=cfg.dtype
+            nn.Dense, kernel_init=xavier_init, use_bias=False, dtype=cfg.dtype
         )
         # Double the hidden dimension for GLU
         x_BxLx2F = linear(2 * cfg.F)(x_BxLxD)
@@ -114,34 +50,16 @@ class Mlp(nn.Module):
         return x_BxLxD
 
 
-class TBlock(nn.Module):
-    """Transformer Block."""
-    docfg: DoConfig
-
-    @nn.compact
-    def __call__(self, in_BxLxD: jax.Array):
-        cfg = self.docfg
-
-        # "pre-layernorm"
-        x_BxLxD = nn.LayerNorm(dtype=cfg.dtype, use_bias=False)(in_BxLxD)
-        x_BxLxD = CausalAttn(cfg)(x_BxLxD)
-        x_BxLxD += in_BxLxD
-
-        z_BxLxD = nn.LayerNorm(dtype=cfg.dtype, use_bias=False)(x_BxLxD)
-        z_BxLxD = Mlp(cfg)(z_BxLxD)
-
-        return x_BxLxD + z_BxLxD
-
-
 class CausalAttn(nn.Module):
     """Causal attention layer."""
+
     cfg: DoConfig
 
     @nn.compact
     def __call__(self, x_BxLxD: jax.Array):
         cfg = self.cfg
 
-        assert cfg.D % cfg.H == 0, f'D {cfg.D} not divisible by H {cfg.H}'
+        assert cfg.D % cfg.H == 0, f"D {cfg.D} not divisible by H {cfg.H}"
         Dh = cfg.D // cfg.H
 
         # Maps D -> (H, Dh)
@@ -155,12 +73,12 @@ class CausalAttn(nn.Module):
         )
 
         q_BxLxHxDh, k_BxLxHxDh, v_BxLxHxDh = (
-            multilinear(name='query')(x_BxLxD),
-            multilinear(name='key')(x_BxLxD),
-            multilinear(name='value')(x_BxLxD),
+            multilinear(name="query")(x_BxLxD),
+            multilinear(name="key")(x_BxLxD),
+            multilinear(name="value")(x_BxLxD),
         )
         q_BxLxHxDh /= Dh**0.5
-        att_BxHxLxL = jnp.einsum('...qhd,...khd->...hqk', q_BxLxHxDh, k_BxLxHxDh)
+        att_BxHxLxL = jnp.einsum("...qhd,...khd->...hqk", q_BxLxHxDh, k_BxLxHxDh)
         # cast to fp32 for softmax
         att_BxHxLxL = att_BxHxLxL.astype(jnp.float32)
 
@@ -172,11 +90,11 @@ class CausalAttn(nn.Module):
         att_BxHxLxL = jnp.where(mask_1x1xLxL, att_BxHxLxL, _NEG_INF)
         att_BxHxLxL = jax.nn.softmax(att_BxHxLxL, axis=-1)
         att_BxHxLxL = att_BxHxLxL.astype(cfg.dtype)
-        out_BxLxHxDh = jnp.einsum('...hqk,...khd->...qhd', att_BxHxLxL, v_BxLxHxDh)
+        out_BxLxHxDh = jnp.einsum("...hqk,...khd->...qhd", att_BxHxLxL, v_BxLxHxDh)
         # Output projection followed by contraction back to original dims
         out_BxLxD = nn.DenseGeneral(
             features=cfg.D,
-            name='attn_out_proj',
+            name="attn_out_proj",
             axis=(-2, -1),
             kernel_init=cfg.kernel_init,
             use_bias=False,
@@ -185,7 +103,98 @@ class CausalAttn(nn.Module):
         return out_BxLxD
 
 
+class TBlock(nn.Module):
+    """Transformer Block."""
+
+    docfg: DoConfig
+
+    @nn.compact
+    def __call__(self, in_BxLxD: jax.Array):
+        cfg = self.docfg
+
+        # "pre-layernorm"
+        x_BxLxD = nn.RMSNorm(param_dtype=cfg.dtype, epsilon=cfg.rmsnorm_epsilon)(
+            in_BxLxD
+        )
+        x_BxLxD = CausalAttn(cfg)(x_BxLxD)
+        x_BxLxD += in_BxLxD
+
+        z_BxLxD = nn.RMSNorm(param_dtype=cfg.dtype, epsilon=cfg.rmsnorm_epsilon)(
+            x_BxLxD
+        )
+        z_BxLxD = Mlp(cfg)(z_BxLxD)
+
+        return x_BxLxD + z_BxLxD
+
+
+class TransformerDo(nn.Module):
+    """Transformer decoder-only."""
+
+    docfg: DoConfig
+
+    def setup(self):
+        cfg = self.docfg
+        self.embed = nn.Embed(
+            num_embeddings=cfg.V,
+            features=cfg.D,
+            embedding_init=cfg.embed_init,
+        )
+
+        self.blocks = [TBlock(cfg) for _ in range(cfg.N)]
+        self.out_ln = nn.RMSNorm(param_dtype=cfg.dtype, epsilon=cfg.rmsnorm_epsilon)
+
+    def __call__(self, y_BxL: jax.Array):
+        # For training on concatenated examples.
+        y_BxLxD = self.embed(y_BxL)
+        for block in self.blocks:
+            y_BxLxD = block(y_BxLxD)
+        y_BxLxD = self.out_ln(y_BxLxD)
+        logits_BxLxV = self.embed.attend(y_BxLxD.astype(jnp.float32))
+        return logits_BxLxV
+
+    def predict(self, y_BxL: jax.Array, k: int = 1):
+        """Generate k tokens autoregressively.
+
+        Args:
+            y_BxL: Input token sequence of shape (batch_size, seq_len)
+            k: Number of tokens to predict
+
+        Returns:
+            Tuple of (input_ids, predicted_ids)
+        """
+        cfg = self.docfg
+        batch_size = y_BxL.shape[0]
+        seq_len = y_BxL.shape[1]
+
+        # Store original input
+        original_input = y_BxL
+
+        # Make sure we don't exceed the model's context length
+        if seq_len + k > cfg.L:
+            raise ValueError(
+                f"Total sequence length ({seq_len + k}) exceeds model's context length ({cfg.L})"
+            )
+
+        # Generate k tokens autoregressively
+        for _ in range(k):
+            # Get logits for the entire sequence
+            logits = self(y_BxL)
+
+            # Get the logits for the last token in each sequence
+            next_token_logits = logits[:, -1, :]
+
+            # Get the most likely token
+            next_token = jnp.argmax(next_token_logits, axis=-1)
+
+            # Append the predicted token to the sequence
+            y_BxL = jnp.concatenate([y_BxL, next_token[:, None]], axis=1)
+
+        # Return original input and the k predicted tokens
+        return original_input, y_BxL[:, -k:]
+
+
 # =========== Demo Code ==========
+
 
 def main():
     """Create and run the DecoderOnly Transformer model."""
@@ -208,7 +217,9 @@ def main():
     input_rng, init_rng = jax.random.split(rng_key)
 
     # Generate random token IDs (integers between 0 and vocab_size-1)
-    x_BxL = jax.random.randint(input_rng, shape=(B, L), minval=0, maxval=cfg.V, dtype=jnp.int32)
+    x_BxL = jax.random.randint(
+        input_rng, shape=(B, L), minval=0, maxval=cfg.V, dtype=jnp.int32
+    )
 
     # Initialize model parameters
     print("\nInitializing model parameters...")
@@ -235,17 +246,35 @@ def main():
     predictions = jnp.argmax(logits, axis=-1)
     print("\nPredicted token IDs (first sequence, first 10 positions):")
     print(predictions[0, :10])
-    
+
     # Test the predict function
     print("\nTesting predict function...")
     # Use a shorter sequence for prediction
     short_seq = x_BxL[:, :10]
     print(f"Input sequence shape: {short_seq.shape}")
-    
+
     # Predict 5 tokens
     k = 5
     original, predicted = model.apply(params, short_seq, k, method=model.predict)
-    
+
+    # Get predictions (token with highest logit at each position)
+    predictions = jnp.argmax(logits, axis=-1)
+    print("\nPredicted token IDs (first sequence, first 10 positions):")
+    print(predictions[0, :10])
+
+    # Test the predict function
+    print("\nTesting predict function...")
+    # Use a shorter sequence for prediction
+    short_seq = x_BxL[:, :10]
+    print(f"Input sequence shape: {short_seq.shape}")
+
+    # Predict 5 tokens
+    k = 5
+    original, predicted = model.apply(params,
+                                      short_seq,
+                                      k,
+                                      method=model.predict)
+
     print(f"Original sequence: {original[0]}")
     print(f"Predicted {k} tokens: {predicted[0]}")
 

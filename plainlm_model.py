@@ -13,9 +13,9 @@ class ModelConfig:
     expand: float
     n_layers: int
     n_heads: int
-    mlp: str = 'mlp'
     rmsnorm_eps: float = 1e-6
     tie_embeddings: bool = False
+
 
 class MLP(nn.Module):
     def __init__(self, dim: int, hidden_dim: int, multiple_of: int = 256):
@@ -34,16 +34,26 @@ class MLP(nn.Module):
         return self.fc2(self.glu(self.fc1(x)))
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, condense_ratio: int = 1):
-    inv_freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device=torch.device("cpu")) / dim))
+def precompute_freqs_cis(
+    dim: int, end: int, theta: float = 10000.0, condense_ratio: int = 1
+):
+    inv_freqs = 1.0 / (
+        theta
+        ** (
+            torch.arange(0, dim, 2, dtype=torch.float32, device=torch.device("cpu"))
+            / dim
+        )
+    )
     t = torch.arange(end, dtype=torch.float32, device=inv_freqs.device) / condense_ratio
     freqs = torch.outer(t, inv_freqs).float()
-    return torch.stack([torch.cos(freqs)[None, :, None, :], torch.sin(freqs)[None, :, None, :]], dim=4)
+    return torch.stack(
+        [torch.cos(freqs)[None, :, None, :], torch.sin(freqs)[None, :, None, :]], dim=4
+    )
 
 
 def apply_rotary_emb_complex_like(
     q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     # Rotate query and key vectors using RoPE
     qk_r2 = torch.cat([q, k], dim=2).unflatten(dim=-1, sizes=(-1, 2)).float()
     rotated_qk_r2 = torch.stack(
@@ -64,26 +74,30 @@ class Attention(nn.Module):
         self.n_heads = cfg.n_heads
         self.head_dim = cfg.dim // cfg.n_heads
 
-        self.w_qkv = nn.Linear(cfg.dim, 3*cfg.dim, bias=False)
+        self.w_qkv = nn.Linear(cfg.dim, 3 * cfg.dim, bias=False)
         self.w_out = nn.Linear(cfg.dim, cfg.dim, bias=False)
 
     def forward(self, x, freqs_cis):
-        bsz, seqlen, d = x.shape # (bsz, seqlen, d)
+        bsz, seqlen, d = x.shape  # (bsz, seqlen, d)
 
-        q, k, v = self.w_qkv(x).split(d, dim=2) # (bsz, seqlen, d)
-        q = q.view(bsz, seqlen, self.n_heads, self.head_dim) # (bsz, seqlen, nh, h_dim)
-        k = k.view(bsz, seqlen, self.n_heads, self.head_dim) # (bsz, seqlen, nh, h_dim)
-        v = v.view(bsz, seqlen, self.n_heads, self.head_dim) # (bsz, seqlen, nh, h_dim)
+        q, k, v = self.w_qkv(x).split(d, dim=2)  # (bsz, seqlen, d)
+        q = q.view(bsz, seqlen, self.n_heads, self.head_dim)  # (bsz, seqlen, nh, h_dim)
+        k = k.view(bsz, seqlen, self.n_heads, self.head_dim)  # (bsz, seqlen, nh, h_dim)
+        v = v.view(bsz, seqlen, self.n_heads, self.head_dim)  # (bsz, seqlen, nh, h_dim)
 
-        q, k = apply_rotary_emb_complex_like(q, k, freqs_cis=freqs_cis) # (bsz, seqlen, nh, h_dim)
+        q, k = apply_rotary_emb_complex_like(
+            q, k, freqs_cis=freqs_cis
+        )  # (bsz, seqlen, nh, h_dim)
 
-        q = q.transpose(1, 2) # (bsz, nh, seqlen, h_dim)
-        k = k.transpose(1, 2) # (bsz, nh, seqlen, h_dim)
-        v = v.transpose(1, 2) # (bsz, nh, seqlen, h_dim)
+        q = q.transpose(1, 2)  # (bsz, nh, seqlen, h_dim)
+        k = k.transpose(1, 2)  # (bsz, nh, seqlen, h_dim)
+        v = v.transpose(1, 2)  # (bsz, nh, seqlen, h_dim)
 
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True) # (bsz, nh, seqlen, h_dim)
+        out = F.scaled_dot_product_attention(
+            q, k, v, is_causal=True
+        )  # (bsz, nh, seqlen, h_dim)
 
-        out = out.transpose(1, 2).contiguous().view(bsz, seqlen, d) # (bsz, seqlen, d)
+        out = out.transpose(1, 2).contiguous().view(bsz, seqlen, d)  # (bsz, seqlen, d)
 
         return self.w_out(out)
 
@@ -109,14 +123,17 @@ class Transformer(nn.Module):
         super().__init__()
         self.n_layers = cfg.n_layers
         self.cfg = cfg
-        head_dim = cfg.dim // cfg.n_heads; assert cfg.dim % cfg.n_heads == 0
+        head_dim = cfg.dim // cfg.n_heads
+        assert cfg.dim % cfg.n_heads == 0
 
         self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.dim)
         self.layers = nn.ModuleList([Block(idx, cfg) for idx in range(cfg.n_layers)])
         self.out_norm = nn.RMSNorm(cfg.dim, eps=cfg.rmsnorm_eps)
         self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
 
-        self.freqs_cis = precompute_freqs_cis(head_dim, cfg.seq_len, 500000)[0:cfg.seq_len]
+        self.freqs_cis = precompute_freqs_cis(head_dim, cfg.seq_len, 500000)[
+            0 : cfg.seq_len
+        ]
 
         # init all weights, scale residual branches
         self.apply(self._init_weights)
@@ -127,11 +144,11 @@ class Transformer(nn.Module):
 
     def forward(self, x):
         # x: (bsz, seqlen)
-        x = self.embed_tokens(x) # (bsz, seqlen, dim)
+        x = self.embed_tokens(x)  # (bsz, seqlen, dim)
         self.freqs_cis = self.freqs_cis.to(x.device)
         for layer in self.layers:
-            x = layer(x, self.freqs_cis) # (bsz, seqlen, dim)
-        return self.lm_head(self.out_norm(x)) # (bsz, seqlen, vocab_size)
+            x = layer(x, self.freqs_cis)  # (bsz, seqlen, dim)
+        return self.lm_head(self.out_norm(x))  # (bsz, seqlen, vocab_size)
 
     def predict(self, x, k=1):
         """Generate k tokens autoregressively.
@@ -175,10 +192,14 @@ class Transformer(nn.Module):
 
     def _scale_residual_branches(self):
         for n, p in self.named_parameters():
-            if n.endswith('fc2.weight'): # mlp/glu output layer
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * self.n_layers))
-            if n.endswith('w_out.weight'): # attn output layer
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * self.n_layers))
+            if n.endswith("fc2.weight"):  # mlp/glu output layer
+                torch.nn.init.normal_(
+                    p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layers)
+                )
+            if n.endswith("w_out.weight"):  # attn output layer
+                torch.nn.init.normal_(
+                    p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layers)
+                )
 
     def tie_weights(self):
         self.lm_head.weight = self.embed_tokens.weight
@@ -187,7 +208,9 @@ class Transformer(nn.Module):
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
             n_params -= self.embed_tokens.weight.numel()
-            if not self.lm_head.weight is self.embed_tokens.weight:  # if no weight tying
+            if (
+                not self.lm_head.weight is self.embed_tokens.weight
+            ):  # if no weight tying
                 n_params -= self.lm_head.weight.numel()
         return n_params
 
@@ -200,13 +223,47 @@ def main():
     # Define model configuration
     config = ModelConfig(
         vocab_size=32000,  # Common vocab size for tokenizers like BPE or SentencePiece
-        seq_len=seq_length,      # Maximum sequence length
-        dim=768,           # Embedding dimension
-        expand=4.0,        # MLP expansion factor
-        n_layers=12,       # Number of transformer layers
-        n_heads=12,        # Number of attention heads
-        rmsnorm_eps=1e-6,   # RMSNorm epsilon
-        tie_embeddings=True # Tie embedding and output weights
+        seq_len=seq_length,  # Maximum sequence length
+        dim=768,  # Embedding dimension
+        expand=4.0,  # MLP expansion factor
+        n_layers=12,  # Number of transformer layers
+        n_heads=12,  # Number of attention heads
+        rmsnorm_eps=1e-6,  # RMSNorm epsilon
+        tie_embeddings=True,  # Tie embedding and output weights
+        mean=0.0,
+        std=0.02 / math.sqrt(2 * self.n_layers),
+    )
+
+    def tie_weights(self):
+        self.lm_head.weight = self.embed_tokens.weight
+
+    def count_params(self, non_embedding=True):
+        n_params = sum(p.numel() for p in self.parameters())
+        if non_embedding:
+            n_params -= self.embed_tokens.weight.numel()
+            if (
+                not self.lm_head.weight is self.embed_tokens.weight
+            ):  # if no weight tying
+                n_params -= self.lm_head.weight.numel()
+        return n_params
+
+
+def main():
+    print("Initializing transformer model and running forward pass...")
+
+    seq_length = 512
+
+    # Define model configuration
+    config = ModelConfig(
+        vocab_size=32000,  # Common vocab size for tokenizers like BPE or SentencePiece
+        seq_len=seq_length,  # Maximum sequence length
+        dim=768,  # Embedding dimension
+        expand=4.0,  # MLP expansion factor
+        n_layers=12,  # Number of transformer layers
+        n_heads=12,  # Number of attention heads
+        rmsnorm_eps=1e-6,  # RMSNorm epsilon
+        tie_embeddings=True,  # Tie embedding and output weights
+        32000,  # Common vocab size for tokenizers like BPE or SentencePiece
     )
 
     # Initialize model
