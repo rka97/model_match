@@ -14,7 +14,7 @@ class ModelConfig:
     n_layers: int
     n_heads: int
     mlp: str = 'mlp'
-    rmsorm_eps: float = 1e-6
+    rmsnorm_eps: float = 1e-6
     tie_embeddings: bool = False
 
 class MLP(nn.Module):
@@ -32,22 +32,6 @@ class MLP(nn.Module):
     def forward(self, x):
         # x: (bsz, T, dim)
         return self.fc2(self.glu(self.fc1(x)))
-
-class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        # x: (bsz, T, dim)
-        output = self._norm(x.float()).type_as(x) # (bsz, T, dim)
-        return output * self.weight
-
-
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, condense_ratio: int = 1):
@@ -108,9 +92,9 @@ class Block(nn.Module):
     def __init__(self, layer_id: int, cfg: ModelConfig):
         super().__init__()
         self.attn = Attention(cfg)
-        self.attn_norm = RMSNorm(cfg.dim, cfg.rmsorm_eps)
+        self.attn_norm = nn.RMSNorm(cfg.dim, eps=cfg.rmsnorm_eps)
         self.mlp = MLP(dim=cfg.dim, hidden_dim=int(cfg.expand * cfg.dim))
-        self.mlp_norm = RMSNorm(cfg.dim, cfg.rmsorm_eps)
+        self.mlp_norm = nn.RMSNorm(cfg.dim, eps=cfg.rmsnorm_eps)
         self.layer_id = layer_id
 
     def forward(self, x, freqs_cis):
@@ -129,7 +113,7 @@ class Transformer(nn.Module):
 
         self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.dim)
         self.layers = nn.ModuleList([Block(idx, cfg) for idx in range(cfg.n_layers)])
-        self.out_norm = RMSNorm(cfg.dim, cfg.rmsorm_eps)
+        self.out_norm = nn.RMSNorm(cfg.dim, eps=cfg.rmsnorm_eps)
         self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
 
         self.freqs_cis = precompute_freqs_cis(head_dim, cfg.seq_len, 500000)[0:cfg.seq_len]
@@ -148,34 +132,34 @@ class Transformer(nn.Module):
         for layer in self.layers:
             x = layer(x, self.freqs_cis) # (bsz, seqlen, dim)
         return self.lm_head(self.out_norm(x)) # (bsz, seqlen, vocab_size)
-    
+
     def predict(self, x, k=1):
         """Generate k tokens autoregressively.
-        
+
         Args:
             x: Input token sequence of shape (batch_size, seq_len)
             k: Number of tokens to predict
-            
+
         Returns:
             Tuple of (input_ids, predicted_ids)
         """
         batch_size = x.shape[0]
         seq_len = x.shape[1]
-        
+
         # Store original input
         original_input = x.clone()
-        
+
         # Generate k tokens autoregressively
         for j in range(k):
             # Get logits for the entire sequence
             logits = self(x)
-            
+
             # Get the logits for the last token in each sequence
             next_token_logits = logits[:, -j, :]
-            
+
             # Get the most likely token
             next_token = torch.argmax(next_token_logits, dim=-1)
-            
+
             # Set the token in x to the predicted one
             x[:, -j] = next_token
 
@@ -221,7 +205,7 @@ def main():
         expand=4.0,        # MLP expansion factor
         n_layers=12,       # Number of transformer layers
         n_heads=12,        # Number of attention heads
-        rmsorm_eps=1e-6,   # RMSNorm epsilon
+        rmsnorm_eps=1e-6,   # RMSNorm epsilon
         tie_embeddings=True # Tie embedding and output weights
     )
 
@@ -257,17 +241,17 @@ def main():
         last_token_logits = output[0, -1, :]
         next_token_id = torch.argmax(last_token_logits).item()
         print(f"Most likely next token ID for first sequence: {next_token_id}")
-        
+
         # Test the predict function
         print("\nTesting predict function...")
         # Use a shorter sequence for prediction
         short_seq = input_ids
         print(f"Input sequence shape: {short_seq.shape}")
-        
+
         # Predict 5 tokens
         k = 5
         original, predicted = model.predict(short_seq, k)
-        
+
         print(f"Original sequence: {original[0, -k:]}")
         print(f"Predicted {k} tokens: {predicted[0]}")
 
