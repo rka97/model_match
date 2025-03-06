@@ -6,7 +6,6 @@ from functools import partial
 from flax import linen as nn
 import jax
 import jax.numpy as jnp
-from match_rope import init_jax_rope, apply_rope_jax
 
 # =========== Transformer Decoder-only Model ==========
 
@@ -29,6 +28,7 @@ class DoConfig:
     dtype: jnp.dtype = jnp.float32
     rmsnorm_epsilon: float = 1e-6
     multiple_of: int = 256
+    tie_embeddings: bool = True  # Whether to tie input and output embeddings
 
 
 class Mlp(nn.Module):
@@ -54,6 +54,44 @@ class Mlp(nn.Module):
         x_BxLxD = linear(cfg.D)(x_BxLxF)
         return x_BxLxD
 
+@partial(jax.jit, static_argnums=(0,1,2))
+def init_rope(dim=256, seq_len=128, n_heads=4):
+    """Initialize rotary embeddings."""
+    def precompute_freqs_cis_jax(dim, end, theta=10000.0):
+        inv_freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2) / dim))
+        t = jnp.arange(end) / 1.0
+        freqs = jnp.outer(t, inv_freqs).astype(jnp.float32)
+        return jnp.stack([
+            jnp.cos(freqs)[None, :, None, :],
+            jnp.sin(freqs)[None, :, None, :]
+        ], axis=3)
+
+    freqs_cis = precompute_freqs_cis_jax(dim // n_heads, seq_len, theta=500000)
+    return freqs_cis.transpose(0, 1, 2, 4, 3)
+
+@jax.jit
+def apply_rope(q, k, freqs_cis):
+    """Apply rotary embeddings to Q and K."""
+    def rotate_tensor(x):
+        # Split into real and imaginary parts
+        x_r2 = x.reshape(*x.shape[:-1], -1, 2)
+        L = x.shape[1]
+        freqs = freqs_cis[:, :L, :, :, :]
+
+        # Apply rotation
+        rotated_x_r2 = jnp.stack([
+            x_r2[..., 0] * freqs[..., 0] - x_r2[..., 1] * freqs[..., 1],
+            x_r2[..., 1] * freqs[..., 0] + x_r2[..., 0] * freqs[..., 1]
+        ], axis=-1)
+
+        return rotated_x_r2.reshape(*x.shape)
+
+    # Apply rotation to Q and K separately
+    rotated_q = rotate_tensor(q)
+    rotated_k = rotate_tensor(k)
+
+    return rotated_q, rotated_k
+
 
 class CausalAttn(nn.Module):
     """Causal attention layer with rotary embeddings."""
@@ -66,7 +104,7 @@ class CausalAttn(nn.Module):
         self.Dh = cfg.D // cfg.H
 
         # Initialize rotary embeddings
-        self.freqs_cis = init_jax_rope(cfg.D, cfg.L, cfg.H)
+        self.freqs_cis = init_rope(cfg.D, cfg.L, cfg.H)
 
         # Maps D -> (H, Dh)
         self.multilinear = partial(
@@ -99,7 +137,7 @@ class CausalAttn(nn.Module):
         v_BxLxHxDh = self.multilinear_value(x_BxLxD)
 
         # Apply rotary embeddings to Q and K
-        q_BxLxHxDh, k_BxLxHxDh = apply_rope_jax(q_BxLxHxDh, k_BxLxHxDh, self.freqs_cis)
+        q_BxLxHxDh, k_BxLxHxDh = apply_rope(q_BxLxHxDh, k_BxLxHxDh, self.freqs_cis)
 
         # Scale queries
         q_BxLxHxDh /= self.Dh**0.5
@@ -169,6 +207,17 @@ class TransformerDo(nn.Module):
 
         self.blocks = [TBlock(cfg) for _ in range(cfg.N)]
         self.out_ln = nn.RMSNorm(param_dtype=cfg.dtype, epsilon=cfg.rmsnorm_epsilon)
+        
+        # Output projection - tied to input embeddings if configured
+        if cfg.tie_embeddings:
+            self.output_proj = lambda x: self.embed.attend(x.astype(jnp.float32))
+        else:
+            self.output_proj = nn.Dense(
+                cfg.V,
+                kernel_init=cfg.embed_init,
+                dtype=cfg.dtype,
+                name="output_proj"
+            )
 
     def __call__(self, y_BxL: jax.Array):
         # For training on concatenated examples.
@@ -176,7 +225,7 @@ class TransformerDo(nn.Module):
         for block in self.blocks:
             y_BxLxD = block(y_BxLxD)
         y_BxLxD = self.out_ln(y_BxLxD)
-        logits_BxLxV = self.embed.attend(y_BxLxD.astype(jnp.float32))
+        logits_BxLxV = self.output_proj(y_BxLxD)
         return logits_BxLxV
 
     def predict(self, y_BxL: jax.Array, k: int = 1):
@@ -276,7 +325,7 @@ def main():
 
     # Test the predict function
     print("\nTesting predict function...")
-    # Use a shorter sequence for prediction
+    # Use a shorter 
     short_seq = x_BxL[:, :10]
     print(f"Input sequence shape: {short_seq.shape}")
 
@@ -288,36 +337,6 @@ def main():
     predictions = jnp.argmax(logits, axis=-1)
     print("\nPredicted token IDs (first sequence, first 10 positions):")
     print(predictions[0, :10])
-
-    # Test the predict function
-    print("\nTesting predict function...")
-    # Use a shorter sequence for prediction
-    short_seq = x_BxL[:, :10]
-    print(f"Input sequence shape: {short_seq.shape}")
-
-    # Predict 5 tokens
-    k = 5
-    original, predicted = model.apply(params, short_seq, k, method=model.predict)
-    # Predict 5 tokens
-    k = 5
-    original, predicted = model.apply(params, short_seq, k, method=model.predict)
-    print(f"Input sequence shape: {short_seq.shape}")
-
-    # Predict 5 tokens
-    k = 5
-    original, predicted = model.apply(params,
-                                      short_seq,
-                                      k,
-                                      method=model.predict)
-    # Predict 5 tokens
-    k = 5
-    original, predicted = model.apply(params,
-                                      short_seq,
-                                      k,
-                                      method=model.predict)
-
-    print(f"Original sequence: {original[0]}")
-    print(f"Predicted {k} tokens: {predicted[0]}")
 
     print("\nDone!")
 
