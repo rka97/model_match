@@ -5,33 +5,48 @@ import uuid
 import time
 import copy
 import glob
+import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
 import torch
 import torch.distributed as dist
 from torch import nn
+import jax.numpy as jnp
+import jax
 
 # -----------------------------------------------------------------------------
 # Basic Data Loader for distributed training
 
 def _load_data_shard(file: Path):
-    header = torch.from_file(str(file), False, 256, dtype=torch.int32)  # header is 256 int32
-    assert header[0] == 20240520, "magic number mismatch in the data .bin file"
-    assert header[1] == 1, "unsupported version"
-    num_tokens = int(header[2])  # number of tokens (claimed)
+    """Load a data shard and return tokens as a numpy array."""
     with file.open("rb", buffering=0) as f:
-        tokens = torch.empty(num_tokens, dtype=torch.uint16, pin_memory=True)
-        f.seek(256 * 4)
-        nbytes = f.readinto(tokens.numpy())
+        # Read header (256 int32 values)
+        header = np.fromfile(f, dtype=np.int32, count=256)
+        assert header[0] == 20240520, "magic number mismatch in the data .bin file"
+        assert header[1] == 1, "unsupported version"
+        num_tokens = int(header[2])  # number of tokens (claimed)
+        
+        # Read token data
+        tokens = np.empty(num_tokens, dtype=np.uint16)
+        nbytes = f.readinto(tokens)
         assert nbytes == 2 * num_tokens, "number of tokens read does not match header"
     return tokens
 
-def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int, world_size: int):
+def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int, world_size: int, framework: str = "torch"):
     """
     Generator for distributed training data.
     Yields (inputs, targets) pairs for training a language model.
+    
+    Args:
+        filename_pattern: Pattern to match data files
+        batch_size: Total batch size across all devices
+        rank: Current process rank
+        world_size: Total number of processes
+        framework: Either "torch" or "jax" to specify output tensor type
     """
     files = [Path(file) for file in sorted(glob.glob(filename_pattern))]
+    if framework == "jax":
+        assert world_size == len(jax.devices())
     assert batch_size % world_size == 0
     local_batch_size = batch_size // world_size
     file_iter = iter(files)  # use itertools.cycle(files) instead for multi-epoch training
@@ -40,9 +55,36 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
     while True:
         if pos + batch_size + 1 >= len(tokens):
             tokens, pos = _load_data_shard(next(file_iter)), 0
+        # Get the slice from numpy array
         buf = tokens[pos + rank * local_batch_size:][:local_batch_size + 1]
-        inputs = buf[:-1].to(device="cuda", dtype=torch.int32, non_blocking=True)
-        targets = buf[1:].to(device="cuda", dtype=torch.int64, non_blocking=True)
+        
+        if framework == "torch":
+            # Convert directly from numpy to torch
+            inputs = torch.from_numpy(buf[:-1]).to(device="cuda", dtype=torch.int32, non_blocking=True)
+            targets = torch.from_numpy(buf[1:]).to(device="cuda", dtype=torch.int64, non_blocking=True)
+        elif framework == "jax":
+            # Get all available devices
+            devices = jax.devices("gpu")
+            num_devices = len(devices)
+            
+            # Calculate shard size per device
+            shard_size = local_batch_size // num_devices
+            assert shard_size * num_devices == local_batch_size, "Batch size must be divisible by number of devices"
+            
+            # Create sharded arrays directly from numpy
+            inputs = jnp.array(buf[:-1], dtype=jnp.int32)
+            targets = jnp.array(buf[1:], dtype=jnp.int64)
+            
+            # Reshape and shard across devices
+            inputs = inputs.reshape(num_devices, shard_size)
+            targets = targets.reshape(num_devices, shard_size)
+            
+            # Distribute across devices
+            inputs = jax.device_put_sharded(list(inputs), devices)
+            targets = jax.device_put_sharded(list(targets), devices)
+        else:
+            raise ValueError(f"Unsupported framework: {framework}")
+            
         pos += batch_size
         yield inputs, targets
 
