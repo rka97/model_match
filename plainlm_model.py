@@ -157,9 +157,18 @@ class Transformer(nn.Module):
         # x: (bsz, seqlen)
         x = self.embed_tokens(x)  # (bsz, seqlen, dim)
         L = x.shape[1]
-        self.freqs_cis = self.freqs_cis.to(x.device)[:, :L, :]
+        
+        # Make sure we have enough precomputed frequencies
+        if L > self.freqs_cis.shape[1]:
+            # Need to recompute for longer sequence
+            head_dim = self.cfg.dim // self.cfg.n_heads
+            self.freqs_cis = precompute_freqs_cis(head_dim, max(L, self.cfg.seq_len), 500000).to(x.device)
+            
+        # Select the frequencies for the current sequence length
+        freqs_cis = self.freqs_cis[:, :L, :]
+        
         for layer in self.layers:
-            x = layer(x, self.freqs_cis)  # (bsz, seqlen, dim)
+            x = layer(x, freqs_cis)  # (bsz, seqlen, dim)
         return self.lm_head(self.out_norm(x))  # (bsz, seqlen, vocab_size)
 
     def predict(self, x, k=1):
@@ -172,27 +181,49 @@ class Transformer(nn.Module):
         Returns:
             Tuple of (input_ids, predicted_ids)
         """
+        # For debugging
+        predictions = []
+        
         batch_size = x.shape[0]
         seq_len = x.shape[1]
 
         # Store original input
         original_input = x.clone()
+        generated_input = x.clone()
 
         # Generate k tokens autoregressively
-        for j in range(k):
+        for i in range(k):
             # Get logits for the entire sequence
-            logits = self(x)
+            logits = self(generated_input)
 
             # Get the logits for the last token in each sequence
-            next_token_logits = logits[:, -j, :]
+            next_token_logits = logits[:, -1, :]
+            
+            # Zero out the last token ID to prevent repetition
+            # This is a common issue - the model gets stuck repeating the last token
+            last_token_id = generated_input[:, -1]
+            next_token_logits.scatter_(1, last_token_id.unsqueeze(1), float('-inf'))
+
+            # Print top 5 tokens for debugging
+            if i == 0:
+                print("\nPyTorch detailed prediction:")
+                top5_values, top5_indices = torch.topk(next_token_logits[0], 5)
+                for j, (idx, val) in enumerate(zip(top5_indices.tolist(), top5_values.tolist())):
+                    prob = torch.softmax(next_token_logits[0], dim=-1)[idx].item()
+                    print(f"  Top {j+1}: Token {idx}, logit={val:.2f}, prob={prob:.6f}")
 
             # Get the most likely token
             next_token = torch.argmax(next_token_logits, dim=-1)
+            predictions.append(next_token.item())
 
-            # Set the token in x to the predicted one
-            x[:, -j] = next_token
+            # Append the predicted token to the sequence
+            next_token = next_token.unsqueeze(1)  # Add sequence dimension
+            generated_input = torch.cat([generated_input, next_token], dim=1)
 
-        return original_input, x[:, -k:]
+        print(f"  Full predictions step by step: {predictions}")
+        
+        # Return all tokens, not just the last k
+        return original_input, generated_input[:, -k:]
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):

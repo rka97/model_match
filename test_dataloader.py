@@ -14,7 +14,7 @@ def test_dataloader(framework="torch"):
     # Use finewebedu data files
     data_files = "data/finewebedu_train_*.bin"
     batch_size = 8
-    
+
     # Test the data loader
     data_gen = distributed_data_generator(data_files, batch_size, rank=0, world_size=1, framework=framework)
     
