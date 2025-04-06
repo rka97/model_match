@@ -7,8 +7,11 @@ from flax import linen as nn
 import jax
 import jax.numpy as jnp
 
-# =========== Transformer Decoder-only Model ==========
+def nvidia_smi():
+    import subprocess  # avoid top level import
+    return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
 
+# =========== Transformer Decoder-only Model ==========
 
 
 @dataclasses.dataclass
@@ -275,8 +278,8 @@ class TransformerDo(nn.Module):
 def main():
     """Create and run the DecoderOnly Transformer model."""
     # Initialize model configuration with smaller parameters for demo
-    B, L = (2, 128)  # Batch size, sequence length
-    cfg = DoConfig(D=128, H=4, L=L, N=2, V=256, F=4 * 128)
+    B, L = (4, 64)  # Batch size, sequence length
+    cfg = DoConfig(D=32, H=4, L=L, N=4, V=10, F=32)
     model = TransformerDo(cfg)
 
     # Print model info
@@ -304,6 +307,10 @@ def main():
     # Print parameter count
     param_count = sum(x.size for x in jax.tree_util.tree_leaves(params))
     print(f"Total parameters: {param_count:,}")
+
+    print("="*100)
+    print(nvidia_smi())
+    print("="*100)
 
     # Make a prediction (forward pass)
     print("\nRunning forward pass...")
