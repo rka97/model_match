@@ -1,0 +1,24 @@
+# Training configuration
+training:
+  batch_size: 16
+  seq_len: 64
+  vocab_size: 16
+  num_steps: 1200
+  eval_every: 50  # num_steps / 24
+  seed: 230
+
+# Model configuration
+model:
+  dim: 32
+  n_heads: 4
+  n_layers: 4
+  ff_dim: 32
+
+# Optimizer configuration
+optimizer:
+  name: one_sided_shampoo
+  learning_rate: 4.0e-3
+  beta: 0
+  b1: 0.9
+  b2: 0.99
+  weight_decay: 0.001

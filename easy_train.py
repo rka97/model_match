@@ -1,13 +1,16 @@
 import jax
 import jax.numpy as jnp
 import optax
+import yaml
+from one_sided_shampoo import one_sided_shampoo
+from pathlib import Path
 from tqdm import tqdm
 from aim import Run
 from data_utils import data_generator
 from nanodo_model import DoConfig, TransformerDo
-from typing import Dict
+from typing import Dict, Tuple, Any
 
-def get_optimizer(config: Dict):
+def get_optimizer(config: Dict) -> Tuple[optax.GradientTransformation, Dict]:
     """Create optimizer from configuration dictionary.
     
     Args:
@@ -32,12 +35,12 @@ def get_optimizer(config: Dict):
             'weight_decay': config.get('weight_decay', 0.01)
         }
         return optax.adamw(
-            learning_rate=lr,
-            b1=config.get('b1', 0.9),
-            b2=config.get('b2', 0.999),
-            eps=config.get('eps', 1e-8),
-            weight_decay=config.get('weight_decay', 0.01)
-        )
+            learning_rate=cleaned_config['learning_rate'],
+            b1=cleaned_config['b1'],
+            b2=cleaned_config['b2'],
+            eps=cleaned_config['eps'],
+            weight_decay=cleaned_config['weight_decay']
+        ), cleaned_config
     elif name == 'adam':
         cleaned_config = {
             'name': name,
@@ -47,11 +50,11 @@ def get_optimizer(config: Dict):
             'eps': config.get('eps', 1e-8)
         }
         return optax.adam(
-            learning_rate=lr,
-            b1=config.get('b1', 0.9),
-            b2=config.get('b2', 0.999),
-            eps=config.get('eps', 1e-8)
-        )
+            learning_rate=cleaned_config['learning_rate'],
+            b1=cleaned_config['b1'],
+            b2=cleaned_config['b2'],
+            eps=cleaned_config['eps']
+        ), cleaned_config
     elif name == 'sgd':
         cleaned_config = {
             'name': name,
@@ -60,10 +63,10 @@ def get_optimizer(config: Dict):
             'nesterov': config.get('nesterov', False)
         }
         return optax.sgd(
-            learning_rate=lr,
-            momentum=config.get('momentum', 0.0),
-            nesterov=config.get('nesterov', False)
-        )
+            learning_rate=cleaned_config['learning_rate'],
+            momentum=cleaned_config['momentum'],
+            nesterov=cleaned_config['nesterov']
+        ), cleaned_config
     elif name == 'rmsprop':
         cleaned_config = {
             'name': name,
@@ -73,51 +76,129 @@ def get_optimizer(config: Dict):
             'momentum': config.get('momentum', 0.0)
         }
         return optax.rmsprop(
-            learning_rate=lr,
-            decay=config.get('decay', 0.9),
-            eps=config.get('eps', 1e-8),
-            momentum=config.get('momentum', 0.0)
-        )
+            learning_rate=cleaned_config['learning_rate'],
+            decay=cleaned_config['decay'],
+            eps=cleaned_config['eps'],
+            momentum=cleaned_config['momentum']
+        ), cleaned_config
+    elif name == 'muon':
+        cleaned_config = {
+            'name': name,
+            'learning_rate': lr,
+            'ns_coeffs': config.get('ns_coeffs', (3.4445, -4.775, 2.0315)),
+            'ns_steps': config.get('ns_steps', 5),
+            'beta': config.get('beta', 0.95),
+            'eps': config.get('eps', 1e-8),
+            'nesterov': config.get('nesterov', True),
+            'adaptive': config.get('adaptive', False),
+            'adam_b1': config.get('adam_b1', 0.9),
+            'adam_b2': config.get('adam_b2', 0.999),
+            'adam_eps_root': config.get('adam_eps_root', 0.0),
+            'adam_weight_decay': config.get('adam_weight_decay', 0.0)
+        }
+        return optax.contrib.muon(
+            learning_rate=cleaned_config['learning_rate'],
+            ns_coeffs=cleaned_config['ns_coeffs'],
+            ns_steps=cleaned_config['ns_steps'],
+            beta=cleaned_config['beta'],
+            eps=cleaned_config['eps'],
+            nesterov=cleaned_config['nesterov'],
+            adaptive=cleaned_config['adaptive'],
+            adam_b1=cleaned_config['adam_b1'],
+            adam_b2=cleaned_config['adam_b2'],
+            adam_eps_root=cleaned_config['adam_eps_root'],
+            adam_weight_decay=cleaned_config['adam_weight_decay']
+        ), cleaned_config
+    elif name == 'lion':
+        cleaned_config = {
+            'name': name,
+            'learning_rate': lr,
+            'b1': config.get('b1', 0.9),
+            'b2': config.get('b2', 0.99),
+            'mu_dtype': config.get('mu_dtype', None),
+            'weight_decay': config.get('weight_decay', 0.001)
+        }
+        return optax.lion(
+            learning_rate=cleaned_config['learning_rate'],
+            b1=cleaned_config['b1'],
+            b2=cleaned_config['b2'],
+            mu_dtype=cleaned_config['mu_dtype'],
+            weight_decay=cleaned_config['weight_decay']
+        ), cleaned_config
+    elif name == 'one_sided_shampoo':
+        cleaned_config = {
+            'name': name,
+            'learning_rate': lr,
+            'beta': config.get('beta', 0.9),
+            'epsilon': config.get('epsilon', 1e-8),
+            'mu_dtype': config.get('mu_dtype', None),
+            'adam_b1': config.get('adam_b1', 0.9),
+            'adam_b2': config.get('adam_b2', 0.999),
+            'adam_eps_root': config.get('adam_eps_root', 0.0),
+            'adam_weight_decay': config.get('adam_weight_decay', 0.0)
+        }
+        return one_sided_shampoo(
+            learning_rate=cleaned_config['learning_rate'],
+            beta=cleaned_config['beta'],
+            epsilon=cleaned_config['epsilon'],
+            mu_dtype=cleaned_config['mu_dtype'],
+            adam_b1=cleaned_config['adam_b1'],
+            adam_b2=cleaned_config['adam_b2'],
+            adam_eps_root=cleaned_config['adam_eps_root'],
+            adam_weight_decay=cleaned_config['adam_weight_decay']
+        ), cleaned_config
     else:
         raise ValueError(f"Unknown optimizer: {name}")
 
+def load_config(config_path: str = "config.yml") -> Dict[str, Any]:
+    """Load configuration from YAML file."""
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    return config
+
 def main():
-    # Initialize Aim run
-    run = Run()
+
+    # Load configuration from YAML
+    config = load_config()
     
-    # Configuration
-    batch_size = 8
-    seq_len = 64
-    vocab_size = 16  # Increased to 16 for more interesting patterns
-    learning_rate = 1e-3
-    num_steps = 1200
-    eval_every = num_steps / 24
-    seed = 230
+    # Training config
+    training_cfg = config['training']
+    batch_size = training_cfg['batch_size']
+    eval_batch_size = training_cfg.get('eval_batch_size', batch_size * 4)  # Larger eval batches
+    seq_len = training_cfg['seq_len']
+    vocab_size = training_cfg['vocab_size']
+    num_steps = training_cfg['num_steps']
+    eval_every = training_cfg['eval_every']
+    seed = training_cfg['seed']
 
+    # Generate fixed evaluation dataset
+    _, eval_rng = jax.random.split(jax.random.PRNGKey(seed + 1))  # Different seed than training
+    eval_dataset = data_generator(eval_rng, eval_batch_size, seq_len, vocab_size)
+
+    # Model config
+    model_cfg = config['model']
+    
     # Optimizer configuration
-    optimizer_config = {
-        'name': 'sgd',
-        'learning_rate': learning_rate,
-        'momentum': 0.0,
-        'nesterov': False
-    }
-
-    # Initialize optimizer and get cleaned config
+    optimizer_config = config['optimizer']
     optimizer, cleaned_config = get_optimizer(optimizer_config)
+
+    # Initialize Aim run
+    import time
+    experiment_name = f"{optimizer_config['name']}_{int(time.time())}"
+    run = Run(experiment=experiment_name)
 
     # Track hyperparameters
     run['hparams'] = {
         'batch_size': batch_size,
         'seq_len': seq_len,
         'vocab_size': vocab_size,
-        'learning_rate': learning_rate,
         'num_steps': num_steps,
         'eval_every': eval_every,
         'seed': seed,
-        'model_dim': 32,
-        'n_heads': 4,
-        'n_layers': 4,
-        'ff_dim': 32,
+        'model_dim': model_cfg['dim'],
+        'n_heads': model_cfg['n_heads'],
+        'n_layers': model_cfg['n_layers'],
+        'ff_dim': model_cfg['ff_dim'],
         'optimizer': cleaned_config
     }
 
@@ -191,10 +272,7 @@ def main():
 
         # Periodic evaluation
         if step % eval_every == 0 or step == num_steps - 1:
-            # Generate evaluation batch with new RNG
-            _, eval_rng = jax.random.split(data_rng)
-            eval_batch = data_generator(eval_rng, batch_size, seq_len, vocab_size)
-            eval_loss, eval_acc = evaluate(params, eval_batch)
+            eval_loss, eval_acc = evaluate(params, eval_dataset)
             
             tqdm.write(
                 f"Step {step:4d} | "
@@ -210,8 +288,8 @@ def main():
             run.track(eval_loss, name='val_loss', step=step, context={'subset': 'val'})
             run.track(eval_acc, name='accuracy', step=step, context={'subset': 'val'})
 
-    # Final test
-    test_batch = data_generator(jax.random.PRNGKey(0), 5, seq_len, vocab_size)
+    # Final test on our fixed eval dataset
+    test_batch = eval_dataset[:5]  # Just show first 5 examples
     inputs = test_batch[:, :-1]
     targets = test_batch[:, 1:]
     predictions = jnp.argmax(model.apply(params, inputs), axis=-1)
