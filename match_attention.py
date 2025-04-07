@@ -76,20 +76,11 @@ def copy_attention_params(pytorch_attn, flax_params):
     def reshape_for_flax(w, n_heads, head_dim):
         return w.reshape(n_heads, head_dim, -1).transpose(2, 0, 1)  # [D, H, Dh]
 
-
     new_params = {
-        "query": {
-            "kernel": reshape_for_flax(q_weight, n_heads, head_dim)
-        },
-        "key": {
-            "kernel": reshape_for_flax(k_weight, n_heads, head_dim)
-        },
-        "value": {
-            "kernel": reshape_for_flax(v_weight, n_heads, head_dim)
-        },
-        "attn_out_proj": {
-            "kernel": w_out.detach().numpy().T
-        },
+        "query": {"kernel": reshape_for_flax(q_weight, n_heads, head_dim)},
+        "key": {"kernel": reshape_for_flax(k_weight, n_heads, head_dim)},
+        "value": {"kernel": reshape_for_flax(v_weight, n_heads, head_dim)},
+        "attn_out_proj": {"kernel": w_out.detach().numpy().T},
     }
 
     # Print parameter shapes for verification
@@ -128,7 +119,7 @@ def compare_attention_outputs(dim=256, n_heads=4, seq_len=10, batch_size=2):
     print(f"Flax: {flax_output.shape}")
 
     # Calculate differences
-    mse = np.mean((torch_output - flax_output)**2)
+    mse = np.mean((torch_output - flax_output) ** 2)
     max_diff = np.max(np.abs(torch_output - flax_output))
 
     print(f"\nAttention Comparison Results:")

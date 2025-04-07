@@ -9,7 +9,9 @@ from plainlm_model import Block, ModelConfig, precompute_freqs_cis
 
 def init_pytorch_block(dim=256, n_heads=4, expand=4.0, seq_len=128):
     """Initialize PyTorch Block from plainlm_model."""
-    print(f"Initializing PyTorch Block with dim={dim}, n_heads={n_heads}, seq_len={seq_len}")
+    print(
+        f"Initializing PyTorch Block with dim={dim}, n_heads={n_heads}, seq_len={seq_len}"
+    )
     config = ModelConfig(
         vocab_size=1000,  # dummy value
         seq_len=seq_len,
@@ -24,7 +26,9 @@ def init_pytorch_block(dim=256, n_heads=4, expand=4.0, seq_len=128):
 
 def init_flax_block(dim=256, n_heads=4, expand=4.0, seq_len=128):
     """Initialize Flax TBlock from nanodo_model."""
-    print(f"Initializing Flax TBlock with dim={dim}, n_heads={n_heads}, seq_len={seq_len}")
+    print(
+        f"Initializing Flax TBlock with dim={dim}, n_heads={n_heads}, seq_len={seq_len}"
+    )
     cfg = DoConfig(
         D=dim,
         H=n_heads,
@@ -123,7 +127,7 @@ def compare_block_outputs(dim=256, n_heads=4, seq_len=10, batch_size=2, expand=4
     print(f"Flax: {flax_output.shape}")
 
     # Calculate differences
-    mse = np.mean((torch_output - flax_output)**2)
+    mse = np.mean((torch_output - flax_output) ** 2)
     max_diff = np.max(np.abs(torch_output - flax_output))
 
     print(f"\nBlock Comparison Results:")

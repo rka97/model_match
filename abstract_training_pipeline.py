@@ -17,6 +17,7 @@ import jax
 # -----------------------------------------------------------------------------
 # Basic Data Loader for distributed training
 
+
 def _load_data_shard(file: Path):
     """Load a data shard and return tokens as a numpy array."""
     with file.open("rb", buffering=0) as f:
@@ -25,18 +26,25 @@ def _load_data_shard(file: Path):
         assert header[0] == 20240520, "magic number mismatch in the data .bin file"
         assert header[1] == 1, "unsupported version"
         num_tokens = int(header[2])  # number of tokens (claimed)
-        
+
         # Read token data
         tokens = np.empty(num_tokens, dtype=np.uint16)
         nbytes = f.readinto(tokens)
         assert nbytes == 2 * num_tokens, "number of tokens read does not match header"
     return tokens
 
-def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int, world_size: int, framework: str = "torch"):
+
+def distributed_data_generator(
+    filename_pattern: str,
+    batch_size: int,
+    rank: int,
+    world_size: int,
+    framework: str = "torch",
+):
     """
     Generator for distributed training data.
     Yields (inputs, targets) pairs for training a language model.
-    
+
     Args:
         filename_pattern: Pattern to match data files
         batch_size: Total batch size across all devices
@@ -49,53 +57,64 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
         assert world_size == len(jax.devices())
     assert batch_size % world_size == 0
     local_batch_size = batch_size // world_size
-    file_iter = iter(files)  # use itertools.cycle(files) instead for multi-epoch training
+    file_iter = iter(
+        files
+    )  # use itertools.cycle(files) instead for multi-epoch training
     tokens, pos = _load_data_shard(next(file_iter)), 0
 
     while True:
         if pos + batch_size + 1 >= len(tokens):
             tokens, pos = _load_data_shard(next(file_iter)), 0
         # Get the slice from numpy array
-        buf = tokens[pos + rank * local_batch_size:][:local_batch_size + 1]
-        
+        buf = tokens[pos + rank * local_batch_size :][: local_batch_size + 1]
+
         if framework == "torch":
             # Convert directly from numpy to torch
-            inputs = torch.from_numpy(buf[:-1]).to(device="cuda", dtype=torch.int32, non_blocking=True)
-            targets = torch.from_numpy(buf[1:]).to(device="cuda", dtype=torch.int64, non_blocking=True)
+            inputs = torch.from_numpy(buf[:-1]).to(
+                device="cuda", dtype=torch.int32, non_blocking=True
+            )
+            targets = torch.from_numpy(buf[1:]).to(
+                device="cuda", dtype=torch.int64, non_blocking=True
+            )
         elif framework == "jax":
             # Get all available devices
             devices = jax.devices("gpu")
             num_devices = len(devices)
-            
+
             # Calculate shard size per device
             shard_size = local_batch_size // num_devices
-            assert shard_size * num_devices == local_batch_size, "Batch size must be divisible by number of devices"
-            
+            assert (
+                shard_size * num_devices == local_batch_size
+            ), "Batch size must be divisible by number of devices"
+
             # Create sharded arrays directly from numpy
             inputs = jnp.array(buf[:-1], dtype=jnp.int32)
             targets = jnp.array(buf[1:], dtype=jnp.int64)
-            
+
             # Reshape and shard across devices
             inputs = inputs.reshape(num_devices, shard_size)
             targets = targets.reshape(num_devices, shard_size)
-            
+
             # Distribute across devices
             inputs = jax.device_put_sharded(list(inputs), devices)
             targets = jax.device_put_sharded(list(targets), devices)
         else:
             raise ValueError(f"Unsupported framework: {framework}")
-            
+
         pos += batch_size
         yield inputs, targets
 
+
 # -----------------------------------------------------------------------------
 # Abstract Model class
+
 
 class AbstractModel(nn.Module):
     """
     Abstract base class for models.
     Implement this for your specific model architecture.
     """
+
     def __init__(self):
         super().__init__()
 
@@ -106,17 +125,20 @@ class AbstractModel(nn.Module):
         """
         raise NotImplementedError("Subclasses must implement forward")
 
+
 # -----------------------------------------------------------------------------
 # Abstract Optimizer class
+
 
 class AbstractOptimizer:
     """
     Abstract base class for optimizers.
     Implement this for your specific optimization algorithm.
     """
+
     def __init__(self, params):
         self.params = list(params)
-        self.param_groups = [{'params': self.params, 'lr': 0.01}]
+        self.param_groups = [{"params": self.params, "lr": 0.01}]
 
     def zero_grad(self, set_to_none=False):
         for param in self.params:
@@ -137,31 +159,40 @@ class AbstractOptimizer:
         """
         Return a state dict for checkpointing.
         """
-        return {'param_groups': self.param_groups}
+        return {"param_groups": self.param_groups}
 
     def load_state_dict(self, state_dict):
         """
         Load a state dict from a checkpoint.
         """
-        self.param_groups = state_dict['param_groups']
+        self.param_groups = state_dict["param_groups"]
+
 
 # -----------------------------------------------------------------------------
 # Training framework
+
 
 @dataclass
 class Hyperparameters:
     # data
     train_files: str = "data/finewebedu_train_*.bin"  # input .bin to train on
-    val_files: str = "data/finewebedu_val_*.bin"  # input .bin to eval validation loss on
+    val_files: str = (
+        "data/finewebedu_val_*.bin"  # input .bin to eval validation loss on
+    )
     val_tokens: int = 32 * 64  # how many tokens of validation data to use
     train_seq_len: int = 32  # sequence length for training
     val_seq_len: int = 32  # sequence length for validation
     # optimization
     num_iterations: int = 1000  # number of iterations to run
-    cooldown_frac: float = 0.4  # fraction of training spent cooling down the learning rate
+    cooldown_frac: float = (
+        0.4  # fraction of training spent cooling down the learning rate
+    )
     # evaluation and logging
-    val_loss_every: int = 100  # every how many steps to evaluate val loss? 0 for only at the end
+    val_loss_every: int = (
+        100  # every how many steps to evaluate val loss? 0 for only at the end
+    )
     save_checkpoint: bool = False
+
 
 def train(model_class, optimizer_classes, args=None):
     """
@@ -188,7 +219,7 @@ def train(model_class, optimizer_classes, args=None):
     if world_size > 1:
         dist.init_process_group(backend="nccl", device_id=device)
         dist.barrier()
-    master_process = (rank == 0)  # this process will do logging, checkpointing etc.
+    master_process = rank == 0  # this process will do logging, checkpointing etc.
 
     # Set up logging
     logfile = None
@@ -207,7 +238,9 @@ def train(model_class, optimizer_classes, args=None):
 
     # Log information about the environment
     print0(f"Running Python {sys.version}")
-    print0(f"Running PyTorch {torch.version.__version__} compiled for CUDA {torch.version.cuda}")
+    print0(
+        f"Running PyTorch {torch.version.__version__} compiled for CUDA {torch.version.cuda}"
+    )
 
     # Construct model and optimizer
     model = model_class().to(device)
@@ -229,20 +262,22 @@ def train(model_class, optimizer_classes, args=None):
             return w * 1.0 + (1 - w) * 0.1
 
     # Optional: Compile the model
-    if hasattr(torch, 'compile'):
+    if hasattr(torch, "compile"):
         model = torch.compile(model, dynamic=False)
 
     # Warmup
     warmup_steps = 10
     initial_state = dict(
         model=copy.deepcopy(model.state_dict()),
-        optimizers=[copy.deepcopy(opt.state_dict()) for opt in optimizers]
+        optimizers=[copy.deepcopy(opt.state_dict()) for opt in optimizers],
     )
 
-    vocab_size = getattr(model, 'vocab_size', 50000)  # Default if not specified
+    vocab_size = getattr(model, "vocab_size", 50000)  # Default if not specified
 
     for _ in range(warmup_steps):
-        inputs = targets = torch.randint(0, vocab_size, size=(args.train_seq_len,), device=device)
+        inputs = targets = torch.randint(
+            0, vocab_size, size=(args.train_seq_len,), device=device
+        )
         model(inputs, targets).backward()
 
         if world_size > 1:
@@ -260,7 +295,9 @@ def train(model_class, optimizer_classes, args=None):
     del initial_state
 
     # Training loop
-    train_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, rank, world_size)
+    train_loader = distributed_data_generator(
+        args.train_files, world_size * args.train_seq_len, rank, world_size
+    )
     training_time_ms = 0
 
     # Start the clock
@@ -269,7 +306,7 @@ def train(model_class, optimizer_classes, args=None):
 
     train_steps = args.num_iterations
     for step in range(train_steps + 1):
-        last_step = (step == train_steps)
+        last_step = step == train_steps
 
         # Validation
         if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
@@ -281,7 +318,9 @@ def train(model_class, optimizer_classes, args=None):
             val_batch_size = world_size * args.val_seq_len
             assert args.val_tokens % val_batch_size == 0
             val_steps = args.val_tokens // val_batch_size
-            val_loader = distributed_data_generator(args.val_files, val_batch_size, rank, world_size)
+            val_loader = distributed_data_generator(
+                args.val_files, val_batch_size, rank, world_size
+            )
             val_loss = 0
 
             with torch.no_grad():
@@ -295,9 +334,12 @@ def train(model_class, optimizer_classes, args=None):
             if world_size > 1:
                 dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
 
-            print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} "
-                  f"train_time:{training_time_ms:.0f}ms "
-                  f"step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
+            print0(
+                f"step:{step}/{train_steps} val_loss:{val_loss:.4f} "
+                f"train_time:{training_time_ms:.0f}ms "
+                f"step_avg:{training_time_ms/max(step, 1):.2f}ms",
+                console=True,
+            )
 
             model.train()
 
@@ -310,7 +352,7 @@ def train(model_class, optimizer_classes, args=None):
                 log = dict(
                     step=step,
                     model=model.state_dict(),
-                    optimizers=[opt.state_dict() for opt in optimizers]
+                    optimizers=[opt.state_dict() for opt in optimizers],
                 )
                 os.makedirs(f"logs/{run_id}", exist_ok=True)
                 torch.save(log, f"logs/{run_id}/state_step{step:06d}.pt")
@@ -339,16 +381,25 @@ def train(model_class, optimizer_classes, args=None):
 
         # Logging
         if step % 10 == 0:  # Log less frequently
-            approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
-            print0(f"step:{step+1}/{train_steps} "
-                  f"train_time:{approx_training_time_ms:.0f}ms "
-                  f"step_avg:{approx_training_time_ms/(step + 1):.2f}ms", console=True)
+            approx_training_time_ms = training_time_ms + 1000 * (
+                time.perf_counter() - t0
+            )
+            print0(
+                f"step:{step+1}/{train_steps} "
+                f"train_time:{approx_training_time_ms:.0f}ms "
+                f"step_avg:{approx_training_time_ms/(step + 1):.2f}ms",
+                console=True,
+            )
 
-    print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
-           f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+    print0(
+        f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
+        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB",
+        console=True,
+    )
 
     if world_size > 1:
         dist.destroy_process_group()
+
 
 # Example usage commented out to avoid running when imported
 # if __name__ == "__main__":

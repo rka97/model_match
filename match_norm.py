@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 
+
 def compare_rmsnorm(dim=256, batch_size=2, seq_len=10, eps=1e-6):
     """Compare PyTorch and Flax RMSNorm implementations."""
     # Initialize modules
@@ -17,7 +18,7 @@ def compare_rmsnorm(dim=256, batch_size=2, seq_len=10, eps=1e-6):
     # Initialize random weights for Flax
     rng = jax.random.PRNGKey(42)
     random_weight = jax.random.normal(rng, (dim,)) * 0.02  # Small random weights
-    flax_params['params']['scale'] = random_weight
+    flax_params["params"]["scale"] = random_weight
 
     # Also set PyTorch weights to same values for fair comparison
     with torch.no_grad():
@@ -46,25 +47,27 @@ def compare_rmsnorm(dim=256, batch_size=2, seq_len=10, eps=1e-6):
 
     return mse, max_diff
 
+
 def main():
     print("=" * 50)
     print("Comparing RMSNorm Implementations")
     print("=" * 50)
-    
+
     # Test configuration
     config = {
-        'dim': 256,
-        'batch_size': 2,
-        'seq_len': 10,
-        'eps': 1e-6,
+        "dim": 256,
+        "batch_size": 2,
+        "seq_len": 10,
+        "eps": 1e-6,
     }
-    
+
     # Run comparison
     mse, max_diff = compare_rmsnorm(**config)
-    
+
     print("\nFinal Results:")
     print(f"Mean Squared Error: {mse:.8f}")
     print(f"Maximum Absolute Difference: {max_diff:.8f}")
+
 
 if __name__ == "__main__":
     main()

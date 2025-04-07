@@ -217,7 +217,6 @@ def main():
     print(f"Average Mean Squared Error: {avg_mse:.8f}")
     print(f"Average Maximum Absolute Difference: {avg_max_diff:.8f}")
 
-
     # Run comparison for m=20 different inputs
     print("\n" + "=" * 50)
     print("Running multiple comparisons with the same models")

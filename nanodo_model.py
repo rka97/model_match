@@ -7,9 +7,14 @@ from flax import linen as nn
 import jax
 import jax.numpy as jnp
 
+
 def nvidia_smi():
     import subprocess  # avoid top level import
-    return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
+
+    return subprocess.run(
+        ["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    ).stdout
+
 
 # =========== Transformer Decoder-only Model ==========
 
@@ -57,24 +62,27 @@ class Mlp(nn.Module):
         x_BxLxD = linear(cfg.D)(x_BxLxF)
         return x_BxLxD
 
-@partial(jax.jit, static_argnums=(0,1,2))
+
+@partial(jax.jit, static_argnums=(0, 1, 2))
 def init_rope(dim=256, seq_len=128, n_heads=4):
     """Initialize rotary embeddings."""
+
     def precompute_freqs_cis_jax(dim, end, theta=10000.0):
         inv_freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2) / dim))
         t = jnp.arange(end) / 1.0
         freqs = jnp.outer(t, inv_freqs).astype(jnp.float32)
-        return jnp.stack([
-            jnp.cos(freqs)[None, :, None, :],
-            jnp.sin(freqs)[None, :, None, :]
-        ], axis=3)
+        return jnp.stack(
+            [jnp.cos(freqs)[None, :, None, :], jnp.sin(freqs)[None, :, None, :]], axis=3
+        )
 
     freqs_cis = precompute_freqs_cis_jax(dim // n_heads, seq_len, theta=500000)
     return freqs_cis.transpose(0, 1, 2, 4, 3)
 
+
 @jax.jit
 def apply_rope(q, k, freqs_cis):
     """Apply rotary embeddings to Q and K."""
+
     def rotate_tensor(x):
         # Split into real and imaginary parts
         x_r2 = x.reshape(*x.shape[:-1], -1, 2)
@@ -82,10 +90,13 @@ def apply_rope(q, k, freqs_cis):
         freqs = freqs_cis[:, :L, :, :, :]
 
         # Apply rotation
-        rotated_x_r2 = jnp.stack([
-            x_r2[..., 0] * freqs[..., 0] - x_r2[..., 1] * freqs[..., 1],
-            x_r2[..., 1] * freqs[..., 0] + x_r2[..., 0] * freqs[..., 1]
-        ], axis=-1)
+        rotated_x_r2 = jnp.stack(
+            [
+                x_r2[..., 0] * freqs[..., 0] - x_r2[..., 1] * freqs[..., 1],
+                x_r2[..., 1] * freqs[..., 0] + x_r2[..., 0] * freqs[..., 1],
+            ],
+            axis=-1,
+        )
 
         return rotated_x_r2.reshape(*x.shape)
 
@@ -210,16 +221,13 @@ class TransformerDo(nn.Module):
 
         self.blocks = [TBlock(cfg) for _ in range(cfg.N)]
         self.out_ln = nn.RMSNorm(param_dtype=cfg.dtype, epsilon=cfg.rmsnorm_epsilon)
-        
+
         # Output projection - tied to input embeddings if configured
         if cfg.tie_embeddings:
             self.output_proj = lambda x: self.embed.attend(x.astype(jnp.float32))
         else:
             self.output_proj = nn.Dense(
-                cfg.V,
-                kernel_init=cfg.embed_init,
-                dtype=cfg.dtype,
-                name="output_proj"
+                cfg.V, kernel_init=cfg.embed_init, dtype=cfg.dtype, name="output_proj"
             )
 
     def __call__(self, y_BxL: jax.Array):
@@ -308,9 +316,9 @@ def main():
     param_count = sum(x.size for x in jax.tree_util.tree_leaves(params))
     print(f"Total parameters: {param_count:,}")
 
-    print("="*100)
+    print("=" * 100)
     print(nvidia_smi())
-    print("="*100)
+    print("=" * 100)
 
     # Make a prediction (forward pass)
     print("\nRunning forward pass...")
@@ -332,7 +340,7 @@ def main():
 
     # Test the predict function
     print("\nTesting predict function...")
-    # Use a shorter 
+    # Use a shorter
     short_seq = x_BxL[:, :10]
     print(f"Input sequence shape: {short_seq.shape}")
 
