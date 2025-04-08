@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import List, Any
 from flax.traverse_util import flatten_dict, unflatten_dict
 from one_sided_shampoo import one_sided_shampoo
+from adaptive_one_sided_shampoo import adaptive_one_sided_shampoo
 from pathlib import Path
 from tqdm import tqdm
 from aim import Run
@@ -162,6 +163,32 @@ def get_optimizer(config: Dict) -> Tuple[optax.GradientTransformation, Dict]:
         }
         return (
             one_sided_shampoo(
+                learning_rate=cleaned_config["learning_rate"],
+                beta=cleaned_config["beta"],
+                epsilon=cleaned_config["epsilon"],
+                mu_dtype=cleaned_config["mu_dtype"],
+                adam_b1=cleaned_config["adam_b1"],
+                adam_b2=cleaned_config["adam_b2"],
+                adam_eps_root=cleaned_config["adam_eps_root"],
+                adam_weight_decay=cleaned_config["adam_weight_decay"],
+            ),
+            cleaned_config,
+        )
+    elif name == "adaptive_one_sided_shampoo":
+        cleaned_config = {
+            "name": name,
+            "learning_rate": lr,
+            "beta": config.get("beta", 0.9),
+            "epsilon": config.get("epsilon", 1e-8),
+            "mu_dtype": config.get("mu_dtype", None),
+            "adam_b1": config.get("adam_b1", 0.9),
+            "adam_b2": config.get("adam_b2", 0.999),
+            "adam_eps_root": config.get("adam_eps_root", 0.0),
+            "adam_weight_decay": config.get("adam_weight_decay", 0.0),
+            "R_EPS": config.get("R_EPS", 1e-4),
+        }
+        return (
+            adaptive_one_sided_shampoo(
                 learning_rate=cleaned_config["learning_rate"],
                 beta=cleaned_config["beta"],
                 epsilon=cleaned_config["epsilon"],

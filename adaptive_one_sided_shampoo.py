@@ -75,15 +75,6 @@ def scale_by_adaptive_one_sided_shampoo(
         )
 
     def update_fn(updates, state, params):
-        current_dist = jax.tree.map(lambda x, y: jnp.linalg.norm(x-y, ord=jnp.inf), state.x0, params)
-        
-        # Compute r_t as max(R_EPS, current_dist, previous r_t)
-        r_t = jax.tree.map(
-            lambda curr, prev: jnp.maximum(curr, prev),
-            current_dist,
-            state.r_t
-        )
-
         count_inc = numerics.safe_increment(state.count)
 
         # Update the momentum
@@ -95,20 +86,22 @@ def scale_by_adaptive_one_sided_shampoo(
             lambda g, L_prev: precondition_grad(g, L_prev), mu_hat, state.L
         )
 
-        # Compute learning rate using j_t
-        grad_sum_sq_new = jax.tree.map(
-            lambda g, s: jnp.square(g) + s,
-            preconditioned_grads,
-            state.grad_sum_sq
-        )
-        vt = jax.tree.map(lambda x: jnp.max(x), grad_sum_sq_new)
-        lr = jax.tree.map(
-            lambda r, d: r / jnp.sqrt(d),
-            r_t,
-            vt
-        )
-        print(lr)
+        current_dist = jax.tree.map(lambda x, y: jnp.linalg.norm(x-y, ord=2), state.x0, params)
 
+        # Compute r_t as max(R_EPS, current_dist, previous r_t)
+        r_t = jax.tree.map(
+            lambda curr, prev: jnp.maximum(curr, prev),
+            current_dist,
+            state.r_t
+        )
+
+        lr = jax.tree_map(
+            lambda r, g: r  * jnp.sqrt(2/g.shape[1]),
+            r_t,
+            preconditioned_grads
+        )
+        print(f"lr={lr}")
+        # input()
         # Scale by learning rate
         final_updates = jax.tree.map(lambda g, z: -g * z, preconditioned_grads, lr)
 
@@ -119,7 +112,7 @@ def scale_by_adaptive_one_sided_shampoo(
             L=new_L,
             mu=mu,
             x0=state.x0,
-            grad_sum_sq=grad_sum_sq_new,
+            grad_sum_sq=state.grad_sum_sq,
             r_t=r_t
         )
 

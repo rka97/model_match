@@ -31,11 +31,19 @@ def test_adaptive_one_sided_shampoo():
 
     # Training loop
     losses = []
-    for _ in range(100):
+    initial_loss = None
+    for i in range(100):
         # Compute loss and gradients
         loss, grads = jax.value_and_grad(loss_fn)(params, X, Y)
+        if initial_loss is None:
+            initial_loss = loss
         losses.append(loss)
-        print(f"loss={loss}")
+        print(f"Step {i}: loss={loss:.4f}")
+
+        # Early stopping if loss explodes
+        if loss > 10 * initial_loss:
+            print(f"Early stopping - loss exceeded 10x initial loss")
+            break
 
         # Update parameters
         updates, opt_state = optimizer.update(grads, opt_state, params)
@@ -52,5 +60,65 @@ def test_adaptive_one_sided_shampoo():
     assert error < 0.5, "Learned weights should be close to true weights"
 
 
+def test_feedforward_network():
+    """Test adaptive one-sided shampoo on a simple feedforward network."""
+    rng = jax.random.PRNGKey(42)
+    np.random.seed(42)
+
+    # Network architecture
+    input_dim = 10
+    hidden_dim = 20
+    output_dim = 5
+    batch_size = 8
+
+    # Generate synthetic data
+    X = np.random.randn(batch_size, input_dim)
+    Y = np.random.randn(batch_size, output_dim)
+
+    # Initialize network parameters
+    params = {
+        'w1': jax.random.normal(rng, (input_dim, hidden_dim)) * 0.01,
+        'b1': jnp.zeros(hidden_dim),
+        'w2': jax.random.normal(rng, (hidden_dim, output_dim)) * 0.01,
+        'b2': jnp.zeros(output_dim)
+    }
+
+    # Define network and loss
+    def forward(params, x):
+        h = jnp.dot(x, params['w1']) + params['b1']
+        h = jax.nn.relu(h)
+        return jnp.dot(h, params['w2']) + params['b2']
+
+    def loss_fn(params, x, y):
+        pred = forward(params, x)
+        return 0.5 * jnp.mean((pred - y) ** 2)
+
+    # Initialize optimizer
+    optimizer = adaptive_one_sided_shampoo(learning_rate=0.1)
+    opt_state = optimizer.init(params)
+
+    # Training loop
+    losses = []
+    initial_loss = None
+    for i in range(100):
+        loss, grads = jax.value_and_grad(loss_fn)(params, X, Y)
+        if initial_loss is None:
+            initial_loss = loss
+        losses.append(loss)
+        print(f"Step {i}: loss={loss:.4f}")
+
+        # Early stopping if loss explodes
+        if loss > 10 * initial_loss:
+            print(f"Early stopping - loss exceeded 10x initial loss")
+            break
+
+        updates, opt_state = optimizer.update(grads, opt_state, params)
+        params = apply_updates(params, updates)
+
+    # Verify training worked
+    assert losses[-1] < losses[0], "Loss should decrease"
+    print(f"Feedforward test - Initial loss: {losses[0]:.4f}, Final loss: {losses[-1]:.4f}")
+
 if __name__ == "__main__":
-    test_adaptive_one_sided_shampoo()
+    # test_adaptive_one_sided_shampoo()
+    test_feedforward_network()

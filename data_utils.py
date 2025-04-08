@@ -2,27 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from nanodo_model import DoConfig, TransformerDo
-
-
-def _load_data_shard(file: Path):
-    """Load a data shard and return tokens as a numpy array."""
-    with file.open("rb", buffering=0) as f:
-        # Read header (256 int32 values)
-        header = np.fromfile(f, dtype=np.int32, count=256)
-        assert header[0] == 20240520, "magic number mismatch in the data .bin file"
-        assert header[1] == 1, "unsupported version"
-        num_tokens = int(header[2])  # number of tokens (claimed)
-
-        # Read token data
-        tokens = np.empty(num_tokens, dtype=np.uint16)
-        nbytes = f.readinto(tokens)
-        assert nbytes == 2 * num_tokens, "number of tokens read does not match header"
-        return tokens
-
-
-def finewebedu_cached_data_generator():
-    pass
-
+from pathlib import Path
 
 def data_generator(
     rng_key: jax.random.PRNGKey, batch_size: int, seq_len: int, V: int = 16
