@@ -103,7 +103,7 @@ class Attention(nn.Module):
         k = k.transpose(1, 2)  # (bsz, nh, seqlen, h_dim)
         v = v.transpose(1, 2)  # (bsz, nh, seqlen, h_dim)
 
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        with sdpa_kernel([SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION]):
             out = F.scaled_dot_product_attention(
                 q, k, v, is_causal=True)  # (bsz, nh, seqlen, h_dim)
 

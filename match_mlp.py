@@ -2,6 +2,7 @@ import torch
 import jax
 import jax.numpy as jnp
 import numpy as np
+import time
 from functools import partial
 
 # Import the MLP implementations from both models
@@ -9,10 +10,16 @@ from plainlm_model import MLP as PyTorchMLP
 from nanodo_model import Mlp as FlaxMLP, DoConfig
 
 
-def init_pytorch_mlp(dim=256, hidden_dim=1024):
+def init_pytorch_mlp(dim=256, hidden_dim=1024, compile_model=True):
     """Initialize PyTorch MLP module."""
-    print(f"Initializing PyTorch MLP with dim={dim}, hidden_dim={hidden_dim}")
+    print(f"Initializing PyTorch MLP with dim={dim}, hidden_dim={hidden_dim}, compile={compile_model}")
     mlp = PyTorchMLP(dim=dim, hidden_dim=hidden_dim)
+    
+    # Compile the MLP module if requested
+    if compile_model:
+        print("Compiling PyTorch MLP with torch.compile...")
+        mlp = torch.compile(mlp, fullgraph=True)
+    
     return mlp
 
 
@@ -27,6 +34,8 @@ def init_flax_mlp(dim=256, hidden_dim=1024):
         N=2,  # not used by MLP
         V=1000,  # not used by MLP
         F=hidden_dim,  # hidden dimension
+        dtype=jnp.float32,
+        rmsnorm_epsilon=1e-6,
     )
 
     # Initialize the MLP
@@ -52,6 +61,10 @@ def copy_pytorch_params_to_flax(pytorch_mlp, flax_params):
         Updated Flax parameter dictionary
     """
     print("\nCopying PyTorch parameters to Flax MLP...")
+
+    # Handle compiled models
+    if hasattr(pytorch_mlp, '_orig_mod'):
+        pytorch_mlp = pytorch_mlp._orig_mod
 
     # Create a new params dict to avoid modifying the original
     new_params = flax_params.copy()
@@ -80,13 +93,121 @@ def copy_pytorch_params_to_flax(pytorch_mlp, flax_params):
     return new_params
 
 
+def compare_mlp_outputs(dim=256, hidden_dim=1024, batch_size=2, seq_len=10, num_trials=100, compile_pytorch=True):
+    """Compare MLP outputs and timing between implementations."""
+    print(f"\nComparing MLPs with {num_trials} trials...")
+    
+    # Initialize MLPs
+    pytorch_mlp = init_pytorch_mlp(dim, hidden_dim, compile_model=compile_pytorch)
+    flax_mlp, flax_params = init_flax_mlp(dim, hidden_dim)
+    flax_params = copy_pytorch_params_to_flax(pytorch_mlp, flax_params)
+
+    # Generate random input for initial comparison
+    np_input = np.random.randn(batch_size, seq_len, dim).astype(np.float32)
+    torch_input = torch.tensor(np_input)
+    jax_input = jnp.array(np_input)
+
+    # PyTorch forward pass
+    with torch.no_grad():
+        pytorch_output = pytorch_mlp(torch_input).numpy()
+
+    # Flax forward pass
+    flax_output = np.array(flax_mlp.apply(flax_params, jax_input))
+
+    print(f"\nOutput shapes:")
+    print(f"PyTorch: {pytorch_output.shape}")
+    print(f"Flax: {flax_output.shape}")
+
+    # Calculate differences
+    mse = np.mean((pytorch_output - flax_output)**2)
+    max_diff = np.max(np.abs(pytorch_output - flax_output))
+
+    print(f"\nMLP Comparison Results:")
+    print(f"MSE: {mse:.8f}")
+    print(f"Max Difference: {max_diff:.8f}")
+
+    # Timing comparison
+    print(f"\n{'=' * 50}")
+    print(f"Running timing comparison with {num_trials} trials...")
+    print(f"PyTorch compiled: {compile_pytorch}")
+    print(f"{'=' * 50}")
+
+    torch_times = []
+    flax_times = []
+
+    # Warmup runs
+    print("Warming up (this may take longer for compiled models)...")
+    for _ in range(10):
+        np_input = np.random.randn(batch_size, seq_len, dim).astype(np.float32)
+        with torch.no_grad():
+            _ = pytorch_mlp(torch.tensor(np_input))
+        _ = flax_mlp.apply(flax_params, jnp.array(np_input))
+    
+    # JAX block_until_ready to ensure compilation is complete
+    jax.block_until_ready(flax_mlp.apply(flax_params, jnp.array(np_input)))
+
+    print(f"Starting {num_trials} timed trials...")
+    for i in range(num_trials):
+        # Generate new random input for each trial
+        np_input = np.random.randn(batch_size, seq_len, dim).astype(np.float32)
+        torch_input = torch.tensor(np_input)
+        jax_input = jnp.array(np_input)
+
+        # Time PyTorch
+        torch_start = time.perf_counter()
+        with torch.no_grad():
+            _ = pytorch_mlp(torch_input)
+        torch_end = time.perf_counter()
+        torch_times.append(torch_end - torch_start)
+
+        # Time JAX/Flax
+        flax_start = time.perf_counter()
+        flax_result = flax_mlp.apply(flax_params, jax_input)
+        jax.block_until_ready(flax_result)  # Ensure computation is complete
+        flax_end = time.perf_counter()
+        flax_times.append(flax_end - flax_start)
+
+        if (i + 1) % 20 == 0:
+            print(f"  Completed {i + 1}/{num_trials} trials")
+
+    # Convert to arrays for statistics
+    torch_times = np.array(torch_times) * 1000  # Convert to milliseconds
+    flax_times = np.array(flax_times) * 1000
+
+    print(f"\n{'=' * 50}")
+    print("Timing Results:")
+    print(f"{'=' * 50}")
+    print(f"\nPyTorch MLP (compiled={compile_pytorch}):")
+    print(f"  Mean: {np.mean(torch_times):.4f} ms")
+    print(f"  Median: {np.median(torch_times):.4f} ms")
+    print(f"  Std Dev: {np.std(torch_times):.4f} ms")
+    print(f"  Min: {np.min(torch_times):.4f} ms")
+    print(f"  Max: {np.max(torch_times):.4f} ms")
+
+    print(f"\nJAX/Flax MLP:")
+    print(f"  Mean: {np.mean(flax_times):.4f} ms")
+    print(f"  Median: {np.median(flax_times):.4f} ms")
+    print(f"  Std Dev: {np.std(flax_times):.4f} ms")
+    print(f"  Min: {np.min(flax_times):.4f} ms")
+    print(f"  Max: {np.max(flax_times):.4f} ms")
+
+    speedup = np.mean(torch_times) / np.mean(flax_times)
+    print(f"\nSpeedup (PyTorch/JAX): {speedup:.2f}x")
+    if speedup > 1:
+        print(f"JAX is {speedup:.2f}x faster than PyTorch")
+    else:
+        print(f"PyTorch is {1/speedup:.2f}x faster than JAX")
+
+    return mse, max_diff, torch_times, flax_times
+
+
 def compare_multiple_inputs(m=20, dim=256, hidden_dim=1024, batch_size=2, seq_len=10):
     """Compare outputs from both MLPs for multiple random inputs."""
     print(f"\nComparing outputs for {m} different random inputs...")
 
     # Initialize MLPs once for all comparisons
     print("Initializing MLPs once for all comparisons...")
-    pytorch_mlp = init_pytorch_mlp(dim, hidden_dim)
+    pytorch_mlp = init_pytorch_mlp(dim, hidden_dim, compile_model=True)
     flax_mlp, flax_params = init_flax_mlp(dim, hidden_dim)
 
     # Copy parameters
@@ -161,7 +282,7 @@ def run_single_comparison(
     """Run a single comparison between PyTorch and Flax MLPs."""
     # Initialize MLPs if not provided
     if pytorch_mlp is None or flax_mlp is None or flax_params is None:
-        pytorch_mlp = init_pytorch_mlp(dim, hidden_dim)
+        pytorch_mlp = init_pytorch_mlp(dim, hidden_dim, compile_model=True)
         flax_mlp, flax_params = init_flax_mlp(dim, hidden_dim)
         flax_params = copy_pytorch_params_to_flax(pytorch_mlp, flax_params)
 
@@ -187,46 +308,29 @@ def run_single_comparison(
 
 def main():
     print("=" * 50)
-    print("Comparing outputs.")
+    print("Comparing MLP Implementations")
     print("=" * 50)
 
-    # Initialize models once
-    print("Initializing models...")
-    dim, hidden_dim = 256, 1024
-    pytorch_mlp = init_pytorch_mlp(dim, hidden_dim)
-    flax_mlp, flax_params = init_flax_mlp(dim, hidden_dim)
-    flax_params = copy_pytorch_params_to_flax(pytorch_mlp, flax_params)
+    # Test configuration
+    config = {
+        "dim": 768,
+        "hidden_dim": 3072,
+        "seq_len": 1024,
+        "batch_size": 16,
+        "num_trials": 100,
+        "compile_pytorch": True,
+    }
 
-    # Run a single comparison with the initialized models
-    print("\n" + "=" * 50)
-    print("Running single comparison with initialized models")
-    print("=" * 50)
-    _, _, mse, max_diff = run_single_comparison(
-        pytorch_mlp=pytorch_mlp, flax_mlp=flax_mlp, flax_params=flax_params
-    )
+    # Run comparison with timing
+    mse, max_diff, torch_times, flax_times = compare_mlp_outputs(**config)
+
+    print(f"\n{'=' * 50}")
+    print("Final Summary:")
+    print(f"{'=' * 50}")
     print(f"Mean Squared Error: {mse:.8f}")
     print(f"Maximum Absolute Difference: {max_diff:.8f}")
-
-    # Run comparison for m=20 different inputs
-    print("\n" + "=" * 50)
-    print("Running multiple comparisons with the same models")
-    print("=" * 50)
-    avg_mse, avg_max_diff = compare_multiple_inputs(m=20)
-
-    print("\nFinal Results:")
-    print(f"Average Mean Squared Error: {avg_mse:.8f}")
-    print(f"Average Maximum Absolute Difference: {avg_max_diff:.8f}")
-
-
-    # Run comparison for m=20 different inputs
-    print("\n" + "=" * 50)
-    print("Running multiple comparisons with the same models")
-    print("=" * 50)
-    avg_mse, avg_max_diff = compare_multiple_inputs(m=20)
-
-    print("\nFinal Results:")
-    print(f"Average Mean Squared Error: {avg_mse:.8f}")
-    print(f"Average Maximum Absolute Difference: {avg_max_diff:.8f}")
+    print(f"PyTorch Mean Time: {np.mean(torch_times):.4f} ms")
+    print(f"JAX Mean Time: {np.mean(flax_times):.4f} ms")
 
 
 if __name__ == "__main__":

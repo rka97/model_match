@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from match_rope import apply_rope_jax, init_jax_rope
 from nanodo_model import CausalAttn, DoConfig
@@ -15,9 +16,61 @@ from plainlm_model import (
 )
 
 
-def init_pytorch_attention(dim=256, n_heads=4, seq_len=128, compile_model=True):
+class AttentionManual(torch.nn.Module):
+    """Attention module using manual einsum computation instead of SDPA."""
+    
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        assert cfg.dim % cfg.n_heads == 0
+        self.dim = cfg.dim
+        self.n_heads = cfg.n_heads
+        self.head_dim = cfg.dim // cfg.n_heads
+
+        self.w_qkv = torch.nn.Linear(cfg.dim, 3 * cfg.dim, bias=False)
+        self.w_out = torch.nn.Linear(cfg.dim, cfg.dim, bias=False)
+
+    def forward(self, x, freqs_cis):
+        from plainlm_model import apply_rotary_emb_complex_like
+        
+        bsz, seqlen, d = x.shape  # (bsz, seqlen, d)
+
+        q, k, v = self.w_qkv(x).split(d, dim=2)  # (bsz, seqlen, d)
+        q = q.view(bsz, seqlen, self.n_heads, self.head_dim)  # (bsz, seqlen, nh, h_dim)
+        k = k.view(bsz, seqlen, self.n_heads, self.head_dim)  # (bsz, seqlen, nh, h_dim)
+        v = v.view(bsz, seqlen, self.n_heads, self.head_dim)  # (bsz, seqlen, nh, h_dim)
+
+        q, k = apply_rotary_emb_complex_like(q, k, freqs_cis=freqs_cis)  # (bsz, seqlen, nh, h_dim)
+
+        # Scale queries
+        q = q / (self.head_dim ** 0.5)
+
+        # Compute attention scores using einsum
+        # q: (bsz, seqlen, nh, h_dim), k: (bsz, seqlen, nh, h_dim)
+        # att: (bsz, nh, seqlen, seqlen)
+        att = torch.einsum("bqhd,bkhd->bhqk", q, k)
+
+        # Create causal mask
+        mask = torch.tril(torch.ones(seqlen, seqlen, dtype=torch.bool, device=x.device))
+        mask = mask.view(1, 1, seqlen, seqlen)
+
+        # Apply mask and softmax
+        att = att.masked_fill(~mask, float('-inf'))
+        att = F.softmax(att, dim=-1)
+
+        # Compute attention output
+        # att: (bsz, nh, seqlen, seqlen), v: (bsz, seqlen, nh, h_dim)
+        # out: (bsz, seqlen, nh, h_dim)
+        out = torch.einsum("bhqk,bkhd->bqhd", att, v)
+
+        # Reshape and project output
+        out = out.contiguous().view(bsz, seqlen, d)  # (bsz, seqlen, d)
+
+        return self.w_out(out)
+
+
+def init_pytorch_attention(dim=256, n_heads=4, seq_len=128, compile_model=True, use_manual_attn=False):
     """Initialize PyTorch attention module from plainlm_model."""
-    print(f"Initializing PyTorch Attention with dim={dim}, n_heads={n_heads}, compile={compile_model}")
+    print(f"Initializing PyTorch Attention with dim={dim}, n_heads={n_heads}, compile={compile_model}, manual={use_manual_attn}")
     config = ModelConfig(
         vocab_size=1000,  # dummy value
         seq_len=seq_len,  # dummy value
@@ -34,7 +87,12 @@ def init_pytorch_attention(dim=256, n_heads=4, seq_len=128, compile_model=True):
         theta=500000,  # match plainlm_model's Transformer config
     )
     
-    attn = Attention(config)
+    # Choose attention implementation
+    if use_manual_attn:
+        attn = AttentionManual(config)
+    else:
+        from plainlm_model import Attention
+        attn = Attention(config)
     
     # Compile the attention module if requested
     if compile_model:
@@ -64,6 +122,12 @@ def copy_attention_params(pytorch_attn, flax_params):
     """Copy parameters from PyTorch Attention to Flax CausalAttn."""
     print("\nCopying attention parameters...")
 
+    # Handle both Attention and AttentionManual
+    if isinstance(pytorch_attn, torch.nn.Module):
+        # Get the underlying module if compiled
+        if hasattr(pytorch_attn, '_orig_mod'):
+            pytorch_attn = pytorch_attn._orig_mod
+    
     n_heads = pytorch_attn.n_heads
     head_dim = pytorch_attn.head_dim
     dim = pytorch_attn.dim
@@ -109,10 +173,10 @@ def copy_attention_params(pytorch_attn, flax_params):
     return {"params": new_params}
 
 
-def compare_attention_outputs(dim=256, n_heads=4, seq_len=10, batch_size=2, num_trials=100, compile_pytorch=True):
+def compare_attention_outputs(dim=256, n_heads=4, seq_len=10, batch_size=2, num_trials=100, compile_pytorch=True, use_manual_attn=False):
     """Compare attention outputs between implementations."""
     # Initialize modules
-    torch_attn, freqs_cis = init_pytorch_attention(dim, n_heads, seq_len, compile_model=compile_pytorch)
+    torch_attn, freqs_cis = init_pytorch_attention(dim, n_heads, seq_len, compile_model=compile_pytorch, use_manual_attn=use_manual_attn)
     flax_attn = init_flax_attention(dim, n_heads, seq_len)
 
     # Initialize Flax params with PyTorch weights
@@ -148,6 +212,7 @@ def compare_attention_outputs(dim=256, n_heads=4, seq_len=10, batch_size=2, num_
     print(f"\n{'=' * 50}")
     print(f"Running timing comparison with {num_trials} trials...")
     print(f"PyTorch compiled: {compile_pytorch}")
+    print(f"PyTorch using manual attention: {use_manual_attn}")
     print(f"{'=' * 50}")
 
     torch_times = []
@@ -195,7 +260,7 @@ def compare_attention_outputs(dim=256, n_heads=4, seq_len=10, batch_size=2, num_
     print(f"\n{'=' * 50}")
     print("Timing Results:")
     print(f"{'=' * 50}")
-    print(f"\nPyTorch Attention (compiled={compile_pytorch}):")
+    print(f"\nPyTorch Attention (compiled={compile_pytorch}, manual={use_manual_attn}):")
     print(f"  Mean: {np.mean(torch_times):.4f} ms")
     print(f"  Median: {np.median(torch_times):.4f} ms")
     print(f"  Std Dev: {np.std(torch_times):.4f} ms")
@@ -226,12 +291,13 @@ def main():
 
     # Test configuration
     config = {
-        "dim": 768,
-        "n_heads": 16,
+        "dim": 1024,
+        "n_heads": 4,
         "seq_len": 1024,
         "batch_size": 16,
-        "num_trials": 100,  # Number of timing trials
+        "num_trials": 10,  # Number of timing trials
         "compile_pytorch": True,  # Enable torch.compile
+        "use_manual_attn": False,  # Use manual einsum-based attention
     }
 
     # Run comparison
