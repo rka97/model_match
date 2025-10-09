@@ -1,4 +1,5 @@
 from functools import partial
+import time
 
 import jax
 import jax.numpy as jnp
@@ -14,9 +15,9 @@ from plainlm_model import (
 )
 
 
-def init_pytorch_attention(dim=256, n_heads=4, seq_len=128):
+def init_pytorch_attention(dim=256, n_heads=4, seq_len=128, compile_model=True):
     """Initialize PyTorch attention module from plainlm_model."""
-    print(f"Initializing PyTorch Attention with dim={dim}, n_heads={n_heads}")
+    print(f"Initializing PyTorch Attention with dim={dim}, n_heads={n_heads}, compile={compile_model}")
     config = ModelConfig(
         vocab_size=1000,  # dummy value
         seq_len=seq_len,  # dummy value
@@ -32,7 +33,15 @@ def init_pytorch_attention(dim=256, n_heads=4, seq_len=128):
         seq_len,
         theta=500000,  # match plainlm_model's Transformer config
     )
-    return Attention(config), freqs_cis
+    
+    attn = Attention(config)
+    
+    # Compile the attention module if requested
+    if compile_model:
+        print("Compiling PyTorch attention with torch.compile...")
+        attn = torch.compile(attn)
+    
+    return attn, freqs_cis
 
 
 def init_flax_attention(dim=256, n_heads=4, seq_len=128):
@@ -100,10 +109,10 @@ def copy_attention_params(pytorch_attn, flax_params):
     return {"params": new_params}
 
 
-def compare_attention_outputs(dim=256, n_heads=4, seq_len=10, batch_size=2):
+def compare_attention_outputs(dim=256, n_heads=4, seq_len=10, batch_size=2, num_trials=100, compile_pytorch=True):
     """Compare attention outputs between implementations."""
     # Initialize modules
-    torch_attn, freqs_cis = init_pytorch_attention(dim, n_heads, seq_len)
+    torch_attn, freqs_cis = init_pytorch_attention(dim, n_heads, seq_len, compile_model=compile_pytorch)
     flax_attn = init_flax_attention(dim, n_heads, seq_len)
 
     # Initialize Flax params with PyTorch weights
@@ -135,7 +144,79 @@ def compare_attention_outputs(dim=256, n_heads=4, seq_len=10, batch_size=2):
     print(f"MSE: {mse:.8f}")
     print(f"Max Difference: {max_diff:.8f}")
 
-    return mse, max_diff
+    # Timing comparison
+    print(f"\n{'=' * 50}")
+    print(f"Running timing comparison with {num_trials} trials...")
+    print(f"PyTorch compiled: {compile_pytorch}")
+    print(f"{'=' * 50}")
+
+    torch_times = []
+    flax_times = []
+
+    # Warmup runs
+    print("Warming up (this may take longer for compiled models)...")
+    for _ in range(10):
+        np_input = np.random.randn(batch_size, seq_len, dim).astype(np.float32)
+        with torch.no_grad():
+            _ = torch_attn(torch.tensor(np_input), freqs_cis)
+        _ = flax_attn.apply(flax_params, jnp.array(np_input))
+    
+    # JAX block_until_ready to ensure compilation is complete
+    jax.block_until_ready(flax_attn.apply(flax_params, jnp.array(np_input)))
+
+    print(f"Starting {num_trials} timed trials...")
+    for i in range(num_trials):
+        # Generate new random input for each trial
+        np_input = np.random.randn(batch_size, seq_len, dim).astype(np.float32)
+        torch_input = torch.tensor(np_input)
+        jax_input = jnp.array(np_input)
+
+        # Time PyTorch
+        torch_start = time.perf_counter()
+        with torch.no_grad():
+            _ = torch_attn(torch_input, freqs_cis)
+        torch_end = time.perf_counter()
+        torch_times.append(torch_end - torch_start)
+
+        # Time JAX/Flax
+        flax_start = time.perf_counter()
+        flax_result = flax_attn.apply(flax_params, jax_input)
+        jax.block_until_ready(flax_result)  # Ensure computation is complete
+        flax_end = time.perf_counter()
+        flax_times.append(flax_end - flax_start)
+
+        if (i + 1) % 20 == 0:
+            print(f"  Completed {i + 1}/{num_trials} trials")
+
+    # Convert to arrays for statistics
+    torch_times = np.array(torch_times) * 1000  # Convert to milliseconds
+    flax_times = np.array(flax_times) * 1000
+
+    print(f"\n{'=' * 50}")
+    print("Timing Results:")
+    print(f"{'=' * 50}")
+    print(f"\nPyTorch Attention (compiled={compile_pytorch}):")
+    print(f"  Mean: {np.mean(torch_times):.4f} ms")
+    print(f"  Median: {np.median(torch_times):.4f} ms")
+    print(f"  Std Dev: {np.std(torch_times):.4f} ms")
+    print(f"  Min: {np.min(torch_times):.4f} ms")
+    print(f"  Max: {np.max(torch_times):.4f} ms")
+
+    print(f"\nJAX/Flax Attention:")
+    print(f"  Mean: {np.mean(flax_times):.4f} ms")
+    print(f"  Median: {np.median(flax_times):.4f} ms")
+    print(f"  Std Dev: {np.std(flax_times):.4f} ms")
+    print(f"  Min: {np.min(flax_times):.4f} ms")
+    print(f"  Max: {np.max(flax_times):.4f} ms")
+
+    speedup = np.mean(torch_times) / np.mean(flax_times)
+    print(f"\nSpeedup (PyTorch/JAX): {speedup:.2f}x")
+    if speedup > 1:
+        print(f"JAX is {speedup:.2f}x faster than PyTorch")
+    else:
+        print(f"PyTorch is {1/speedup:.2f}x faster than JAX")
+
+    return mse, max_diff, torch_times, flax_times
 
 
 def main():
@@ -145,25 +226,24 @@ def main():
 
     # Test configuration
     config = {
-        "dim": 48,
-        "n_heads": 3,
-        "seq_len": 16,
-        "batch_size": 7,
+        "dim": 768,
+        "n_heads": 16,
+        "seq_len": 1024,
+        "batch_size": 16,
+        "num_trials": 100,  # Number of timing trials
+        "compile_pytorch": True,  # Enable torch.compile
     }
 
     # Run comparison
-    mse, max_diff = compare_attention_outputs(**config)
+    mse, max_diff, torch_times, flax_times = compare_attention_outputs(**config)
 
-    print("\nFinal Results:")
+    print(f"\n{'=' * 50}")
+    print("Final Summary:")
+    print(f"{'=' * 50}")
     print(f"Mean Squared Error: {mse:.8f}")
     print(f"Maximum Absolute Difference: {max_diff:.8f}")
-
-    # Run comparison
-    mse, max_diff = compare_attention_outputs(**config)
-
-    print("\nFinal Results:")
-    print(f"Mean Squared Error: {mse:.8f}")
-    print(f"Maximum Absolute Difference: {max_diff:.8f}")
+    print(f"PyTorch Mean Time: {np.mean(torch_times):.4f} ms")
+    print(f"JAX Mean Time: {np.mean(flax_times):.4f} ms")
 
 
 if __name__ == "__main__":

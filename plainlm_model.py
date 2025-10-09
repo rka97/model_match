@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch import nn
 from dataclasses import dataclass
 from typing import Tuple
-
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 @dataclass
@@ -84,6 +84,7 @@ class Attention(nn.Module):
         self.w_qkv = nn.Linear(cfg.dim, 3 * cfg.dim, bias=False)
         self.w_out = nn.Linear(cfg.dim, cfg.dim, bias=False)
 
+    @torch.compile
     def forward(self, x, freqs_cis):
         bsz, seqlen, d = x.shape  # (bsz, seqlen, d)
 
@@ -102,8 +103,9 @@ class Attention(nn.Module):
         k = k.transpose(1, 2)  # (bsz, nh, seqlen, h_dim)
         v = v.transpose(1, 2)  # (bsz, nh, seqlen, h_dim)
 
-        out = F.scaled_dot_product_attention(
-            q, k, v, is_causal=True)  # (bsz, nh, seqlen, h_dim)
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            out = F.scaled_dot_product_attention(
+                q, k, v, is_causal=True)  # (bsz, nh, seqlen, h_dim)
 
         out = out.transpose(1, 2).contiguous().view(bsz, seqlen,
                                                     d)  # (bsz, seqlen, d)
